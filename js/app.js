@@ -378,7 +378,7 @@ function vMatches() {
   return `<div class="row between"><h2>Wedstrijden</h2><button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button></div>
     ${editing ? matchForm(editing) : ""}
     <details class="card" id="importbox" ${ui.importRows ? "open" : ""}><summary>Programma plakken vanaf de clubsite</summary>
-      <p class="small muted">Open het programma van je team op de clubsite of in de Voetbal.nl-app, selecteer de wedstrijden, kopieer ze en plak ze hieronder. De planner zoekt per regel de datum, aftrap en de twee teams.${ownKeys().length ? "" : " Vul eerst je club in bij Instellingen, dan herkent hij thuis en uit."}</p>
+      <p class="small muted">Open het programma van je team op de clubsite of in de Voetbal.nl-app, selecteer de wedstrijden, kopieer ze en plak ze hieronder. Het formaat maakt niet uit: de planner zoekt zelf de datum, aftrap en de twee teams, ook als die op aparte regels staan. Klopt er iets niet, pas het dan aan in de lijst hieronder.${ownKeys().length ? "" : " Vul eerst je club in bij Instellingen, dan herkent hij thuis en uit."}</p>
       <textarea id="imp-text" aria-label="Geplakt programma" placeholder="za 2 nov 10:30  VV Balk JO15-2 - SC Joure JO15-1">${esc(ui.importText || "")}</textarea>
       <div class="row"><button class="btn" type="button" data-act="parse">Lees programma</button></div>
       ${ui.importRows ? (ui.importRows.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Datum</th><th>Aftrap</th><th>T/U</th><th>Tegenstander</th></tr></thead><tbody>
@@ -387,7 +387,7 @@ function vMatches() {
         <td>${esc(r.opponent)}${r.dup ? ' <span class="pill">staat er al</span>' : ""}</td></tr>`).join("")}</tbody></table></div>
         <div class="row"><button class="btn primary" type="button" data-act="import">Geselecteerde wedstrijden toevoegen</button></div>
         <p class="small muted">Vul daarna bij uitwedstrijden het adres en de reistijd in via Wijzig.</p>`
-        : `<div class="notice">Geen wedstrijden gevonden. Elke regel moet een aftrap (bv. 10:30) en "team - team" bevatten.</div>`) : ""}
+        : `<div class="notice">Geen wedstrijden gevonden. Zorg dat bij elke wedstrijd een datum, een aftrap (bv. 10:30) en de twee teams staan.</div>`) : ""}
     </details>
     ${list.length ? `<div class="tablewrap"><table><thead><tr><th>Datum</th><th></th><th>Tegenstander</th><th>Aftrap</th><th>Aanwezig</th><th>Vertrek</th><th></th></tr></thead><tbody>
     ${list.map(m => { const t = times(m); return `<tr style="${isPast(m) ? "opacity:.6" : ""}"><td>${esc(fmtDate(m.date))}</td><td><span class="pill ${m.home ? "home" : "away"}">${m.home ? "T" : "U"}</span></td><td>${esc(m.opponent)}</td><td>${t.ko}</td><td>${t.arrive}</td><td>${t.depart || "–"}</td><td><button class="btn ghost small" data-act="editmatch" data-id="${m.id}">Wijzig</button></td></tr>`; }).join("")}
@@ -527,25 +527,50 @@ function ownKeys() {
   const stop = /^(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|de|het)$/i;
   return String(S.settings.club || "").toLowerCase().split(/\s+/).filter(w => w.length > 1 && !stop.test(w));
 }
+const TEAMCODE = /\b(?:JO|MO|O|JM)\s?\d{1,2}(?:\s?-\s?\d{1,2})?\b|\b(?:VR|Vrouwen|Heren|Senioren|Zondag|Zaterdag)\s?\d{0,2}\b/i;
+const NOT_TEAM = /^(veld|uitslag|scheidsrechter|scheids|accommodatie|locatie|wedstrijd|programma|thuis|uit|competitie|beker|oefen|vriendschappelijk|kleedkamer|aanvang|datum|tijd|sportpark|afgelast|status|klasse|poule|info|route|details|verzamelen|vertrek)\b/i;
+const WEEKDAY = /\b(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag|ma|di|wo|do|vr|za|zo)\b\.?/ig;
 function parseProgram(text) {
   const out = []; let curDate = null; const keys = ownKeys();
-  String(text || "").split(/\r?\n/).map(l => l.replace(/\s+/g, " ").trim()).filter(Boolean).forEach(line => {
-    const d = findDate(line); let rest = line;
-    if (d) { curDate = d.iso; rest = rest.replace(d.raw, " "); }
-    const t = rest.match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/);
-    const parts = rest.split(/\s[-–—]\s|\s(?:vs\.?|tegen)\s/i);
-    if (!t || parts.length < 2 || !curDate) return;
-    const clean = x => x.replace(t[0], " ").replace(/^(ma|di|wo|do|vr|za|zo)[a-z]*\.?\s/i, "").replace(/\s+/g, " ").trim();
-    const a = clean(parts[0]), b = clean(parts.slice(1).join(" - "));
-    if (!a || !b) return;
-    const isOwn = x => keys.length && keys.some(k => x.toLowerCase().includes(k));
-    const home = isOwn(a) ? true : isOwn(b) ? false : null;
+  const ownTeam = String(S.settings.team || "").toLowerCase().replace(/\s/g, "");
+  let cur = null; // { time, teams: [], date }
+  const finish = () => {
+    if (!cur || !cur.time || cur.teams.length < 2 || !(cur.date || curDate)) return;
+    const [a, b] = cur.teams; const date = cur.date || curDate;
+    const score = x => { const l = x.toLowerCase(); let sc = keys.some(k => l.includes(k)) ? 1 : 0; if (sc && ownTeam && l.replace(/\s/g, "").includes(ownTeam)) sc++; return sc; };
+    const sa = score(a), sb = score(b);
+    const home = sa > sb ? true : sb > sa ? false : null;
     const opponent = home === false ? a : b;
     const known = S.matches.find(x => x.opponent === opponent && !x.home);
-    out.push({ date: curDate, time: String(t[1]).padStart(2, "0") + ":" + t[2], home: home !== false, unsure: home === null, opponent,
+    out.push({ date, time: cur.time, home: home !== false, unsure: home === null, opponent,
       address: known ? known.address : "", travel: known ? known.travel : 0,
-      dup: S.matches.some(x => x.date === curDate && x.opponent === opponent) });
+      dup: S.matches.some(x => x.date === date && x.opponent === opponent) });
+    cur = null;
+  };
+  String(text || "").split(/\r?\n/).forEach(rawLine => {
+    let line = rawLine.replace(/ /g, " ").trim(); if (!line) return;
+    const d = findDate(line);
+    if (d) { line = line.replace(d.raw, " "); curDate = d.iso; if (cur && !cur.date) cur.date = curDate; }
+    const t = line.match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/);
+    if (t) {
+      line = line.replace(t[0], " ");
+      const time = String(t[1]).padStart(2, "0") + ":" + t[2];
+      if (cur && cur.time && cur.teams.length < 2) cur = null;
+      if (!cur) cur = { time: null, teams: [], date: curDate };
+      cur.time = time; if (!cur.date && curDate) cur.date = curDate;
+    }
+    const frags = line.replace(WEEKDAY, " ").split(/\t|\s{2,}|\s[-–—|]\s|\s(?:vs\.?|tegen)\s/i)
+      .map(f => f.replace(/[()\[\],;]/g, " ").replace(/\s+/g, " ").trim()).filter(f => f.length >= 3 && /[a-z]/i.test(f) && !NOT_TEAM.test(f));
+    let teams = frags.filter(f => TEAMCODE.test(f) || keys.some(k => f.toLowerCase().includes(k)));
+    if (!teams.length && frags.length && cur) teams = frags.filter(f => f.split(" ").length <= 6 && !/\d{4}/.test(f));
+    teams.forEach(f => {
+      if (!cur) cur = { time: null, teams: [], date: curDate };
+      if (cur.teams.length < 2) cur.teams.push(f);
+      if (cur.teams.length === 2 && cur.time) finish();
+    });
+    if (cur && cur.time && cur.teams.length === 2) finish();
   });
+  finish();
   return out;
 }
 
@@ -658,6 +683,6 @@ document.addEventListener("submit", e => {
   }
 });
 
-window.__tp = { get S() { return S; }, planDuties, planLineup, seasonStats, times };
+window.__tp = { get S() { return S; }, parseProgram, planDuties, planLineup, seasonStats, times };
 render(); init();
 })();
