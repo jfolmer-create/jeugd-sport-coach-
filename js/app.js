@@ -273,9 +273,11 @@ function vError() { return `<div class="card empty"><h2>Dat lukt niet</h2><p cla
 function vLogin() {
   return `<form class="card" id="loginform" style="max-width:460px;justify-self:center;width:100%"><h2>Inloggen</h2>
     <p class="muted">Plan rijders, grensrechters, de was en een eerlijk wisselschema voor je jeugdteam. Je logt in met je e-mailadres, zonder wachtwoord.</p>
-    ${ui.loginSent ? `<div class="notice">We hebben een mail gestuurd naar ${esc(ui.loginEmail)}. Tik op de link in die mail, of vul hieronder de code uit de mail in.</div>
-      <label class="f">Code uit de mail<input id="lf-code" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
-      <div class="row"><button class="btn primary" type="submit">Inloggen met code</button><button class="btn ghost" type="button" data-act="loginreset">Ander e-mailadres</button></div>`
+    ${ui.loginSent ? `<div class="notice">We hebben een mail gestuurd naar ${esc(ui.loginEmail)}. Open die mail op dit apparaat en tik op de link om in te loggen. Geen mail gezien? Kijk ook bij spam.</div>
+      <details><summary>Staat er een code in de mail?</summary><div class="stack" style="margin-top:8px">
+      <label class="f">Code uit de mail<input id="lf-code" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+      <div class="row"><button class="btn primary" type="submit">Inloggen met code</button></div></div></details>
+      <div class="row"><button class="btn ghost" type="button" data-act="loginreset">Ander e-mailadres</button></div>`
     : `<label class="f">E-mailadres<input id="lf-email" name="email" type="email" autocomplete="email" required value="${esc(ui.loginEmail)}"></label>
       <div class="row"><button class="btn primary" type="submit">Stuur inloglink</button></div>`}
   </form>`;

@@ -29,7 +29,7 @@ Het is een statische website (HTML, CSS en JavaScript, zonder build-stap) die vi
 3. Ga naar **Authentication → URL Configuration**:
    - *Site URL*: `https://jfolmer-create.github.io/jeugd-sport-coach-/`
    - *Redirect URLs*: voeg hetzelfde adres toe.
-4. Optioneel, maar handig op de telefoon: ga naar **Authentication → Emails → Magic Link** en zet `Je code: {{ .Token }}` in de mail. Dan kun je ook inloggen met de code in plaats van de link.
+4. Optioneel, alleen met eigen SMTP (zie Privacy): zet in **Authentication → Emails → Magic Link** de regel `<p>Je code: {{ .Token }}</p>`. Dan kun je ook inloggen met een code in plaats van de link.
 5. Kopieer bij **Project Settings → API** de *Project URL* en de *anon / publishable key* naar `js/config.js`. Gebruik nooit de *service_role* of *secret* key: die geeft volledige toegang.
 
 ### 2. GitHub Pages
