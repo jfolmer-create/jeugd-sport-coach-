@@ -3,7 +3,7 @@
 Een web-app voor coaches van jeugdteams. Hij werkt op telefoon en computer en je kunt hem op je beginscherm zetten.
 
 - **Spelers** met hun posities, en per gezin wat de ouders kunnen doen: rijden (met het aantal plekken), grensrechter en wassen.
-- **Wedstrijden** invoeren of in één keer plakken vanaf de clubsite. De app rekent de verzameltijd uit (standaard 45 minuten voor de aftrap) en bij uitwedstrijden hoe laat je vanaf de thuisclub vertrekt.
+- **Wedstrijden** invoeren of in één keer plakken vanaf de clubsite. De app rekent de verzameltijd uit (standaard 45 minuten voor de aftrap). Bij uitwedstrijden berekent hij de reistijd (OpenStreetMap) en de vertrektijd vanaf het eigen sportcomplex, altijd naar beneden afgerond op 5 minuten.
 - **Taakschema**: met één knop eerlijk verdeeld over het seizoen, rekening houdend met afwezigen en wat ieder gezin kan.
 - **Wisselschema** per wedstrijd met posities. Kinderen met de minste speelminuten krijgen voorrang, zodat iedereen over het seizoen ongeveer even veel speelt.
 - **Kijklink voor ouders**: zij zien de tijden en taken, maar kunnen niets wijzigen.

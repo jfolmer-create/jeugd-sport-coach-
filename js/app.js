@@ -123,8 +123,46 @@ const present = m => S.players.filter(p => !(m.absent || []).includes(p.id));
 const isPast = m => m.date < todayStr();
 function times(m) {
   const ko = toMin(m.time), arrive = ko - (+S.settings.arriveBefore || 0);
-  const depart = m.home ? null : arrive - (+m.travel || 0);
+  // vertrektijd altijd naar beneden afronden op 5 minuten (10:43 wordt 10:40)
+  const depart = m.home ? null : Math.floor((arrive - (+m.travel || 0)) / 5) * 5;
   return { ko: fmt(ko), arrive: fmt(arrive), depart: depart == null ? null : fmt(depart) };
+}
+// ---------- reistijd (OpenStreetMap: Nominatim + OSRM) ----------
+const geoCache = {};
+const clubFromTeam = name => String(name || "").replace(TEAMCODE, " ").replace(/\s+/g, " ").trim();
+async function geocode(q) {
+  const key = q.toLowerCase().trim(); if (geoCache[key]) return geoCache[key];
+  const r = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=nl,be,de&accept-language=nl&q=" + encodeURIComponent(q));
+  if (!r.ok) throw new Error("zoeken mislukt");
+  const j = await r.json(); if (!j.length) return null;
+  return geoCache[key] = { lat: +j[0].lat, lon: +j[0].lon, label: j[0].display_name };
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Geeft { minutes, km, label, query } of gooit een Error met een Nederlandse melding.
+async function calcTravel(address, opponent) {
+  if (!S.settings.homeAddress) throw new Error("Vul eerst het adres van je eigen sportcomplex in bij Instellingen.");
+  const home = await geocode(S.settings.homeAddress);
+  if (!home) throw new Error("Het adres van je eigen sportcomplex is niet gevonden. Pas het aan bij Instellingen (bv. straat en plaats).");
+  const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
+  let dest = null, query = "";
+  for (const q of tries) { await sleep(1100); dest = await geocode(q); if (dest) { query = q; break; } }
+  if (!dest) throw new Error("Het adres van de uitclub is niet gevonden. Vul het adres in (straat en plaats).");
+  const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${home.lon},${home.lat};${dest.lon},${dest.lat}?overview=false`);
+  const j = r.ok ? await r.json() : null;
+  if (!j || !j.routes || !j.routes.length) throw new Error("Er is geen route gevonden.");
+  return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query };
+}
+async function calcMissingTravel() {
+  const list = sorted().filter(m => !m.home && m.date >= todayStr() && !+m.travel);
+  if (!list.length) { toast("Alle uitwedstrijden hebben al een reistijd."); return; }
+  let ok = 0, fail = [];
+  for (const m of list) {
+    toast("Reistijd berekenen: " + (m.opponent || "") + "…");
+    try { const r = await calcTravel(m.address, m.opponent); m.travel = r.minutes; m.km = r.km; m.travelPlace = r.label; if (!m.address) m.address = r.label.split(",").slice(0, 3).join(","); ok++; }
+    catch (e) { fail.push(m.opponent); if (/eigen sportcomplex/.test(e.message)) { toast(e.message); break; } }
+  }
+  save(); render();
+  toast(ok + " reistijd(en) berekend." + (fail.length ? " Niet gevonden: " + fail.join(", ") + ". Vul daar het adres in." : ""));
 }
 function toast(t) { const el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
 async function copy(text) {
@@ -331,6 +369,7 @@ function matchCard(m, isNext) {
       ${S.settings.washPerMatch ? dutyRow("Wassen", d.wash) : ""}
       ${(m.absent || []).length ? `<div class="duty"><span>Afwezig</span><div class="names">${m.absent.map(id => `<span class="pill warn">${esc(pName(id))}</span>`).join("")}</div></div>` : ""}
     </div>
+    ${!m.home && !+m.travel && canEdit() ? `<div class="notice">Nog geen reistijd, dus de vertrektijd klopt niet. <button class="btn" data-act="calcall">Bereken reistijden</button></div>` : ""}
     ${issues.map(i => `<div class="notice">${esc(i)}</div>`).join("")}
     <div class="row">
       <button class="btn" data-act="copy" data-id="${m.id}">Kopieer voor WhatsApp</button>
@@ -349,7 +388,7 @@ function vPlanning() {
     ${canEdit() ? "" : `<p class="small muted">Kun je niet op je beurt? Laat het de coach op tijd weten, dan wordt er geruild.</p>`}
     <p class="muted small" ${canEdit() ? "" : "hidden"}>Vastgezette en gespeelde wedstrijden blijven zoals ze zijn. De rest wordt eerlijk verdeeld: wie het minst vaak aan de beurt was, gaat voor.</p>
     ${up.length ? up.map((m, i) => matchCard(m, i === 0)).join("") : `<div class="card empty"><p class="muted">Nog geen komende wedstrijden.</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
-    ${up.length ? `<button class="btn" data-act="copyall">Kopieer hele schema</button>` : ""}`;
+    ${up.length ? `<div class="row"><button class="btn" data-act="copyall">Kopieer hele schema</button>${canEdit() && up.some(m => !m.home && !+m.travel) ? '<button class="btn" data-act="calcall">Bereken ontbrekende reistijden</button>' : ""}</div>` : ""}`;
 }
 function matchForm(m) {
   const isNew = !m.id; const known = [...new Map(S.matches.filter(x => !x.home && x.opponent).map(x => [x.opponent, x])).values()];
@@ -364,8 +403,9 @@ function matchForm(m) {
     <datalist id="opps">${known.map(x => `<option value="${esc(x.opponent)}">`).join("")}</datalist>
     <div class="grid2" id="awayfields" ${m.home !== false ? "hidden" : ""}>
       <label class="f">Adres uitclub<input id="mf-addr" name="address" value="${esc(m.address || "")}" placeholder="Sportpark, straat, plaats"></label>
-      <label class="f">Reistijd vanaf thuisclub (min)<input id="mf-travel" name="travel" type="number" min="0" step="5" value="${esc(m.travel ?? "")}"></label>
+      <label class="f">Reistijd vanaf eigen sportcomplex (min)<span class="row" style="flex-wrap:nowrap"><input id="mf-travel" name="travel" type="number" min="0" step="1" value="${esc(m.travel ?? "")}"><button class="btn" type="button" data-act="calctravel">Bereken</button></span></label>
     </div>
+    <p class="small muted" id="travel-info" ${m.home !== false ? "hidden" : ""}>${m.travelPlace ? "Berekend naar: " + esc(m.travelPlace) + (m.km ? " (" + m.km + " km)" : "") : "Laat je het adres leeg, dan zoekt de planner op de naam van de club."}</p>
     ${maps ? `<p class="small"><a href="${maps}" target="_blank" rel="noopener">Reistijd opzoeken in Google Maps</a></p>` : `<p class="small muted">Tip: vul je thuisadres in bij Instellingen, dan krijg je hier een link naar de route.</p>`}
     ${S.players.length ? `<div class="f"><span class="small muted">Afwezig (ziek, vakantie, …)</span><div class="checks">${S.players.map(p => `<label><input type="checkbox" name="absent" value="${p.id}" ${(m.absent || []).includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("")}</div></div>` : ""}
     <div class="row"><button class="btn primary" type="submit">Opslaan</button><button class="btn ghost" type="button" data-act="cancel">Annuleren</button>
@@ -478,7 +518,7 @@ function vSettings() {
       <label class="f">Club<input id="sf-club" name="club" value="${esc(s.club)}" placeholder="bv. VV De Meeuwen"></label>
       <label class="f">Team<input id="sf-team" name="team" value="${esc(s.team)}" placeholder="bv. JO11-2"></label>
     </div>
-    <label class="f">Adres thuisclub (vertrekpunt bij uitwedstrijden)<input id="sf-addr" name="homeAddress" value="${esc(s.homeAddress)}"></label>
+    <label class="f">Adres eigen sportcomplex (vertrekpunt bij uitwedstrijden, bv. Sportpark De Wissel, Balk)<input id="sf-addr" name="homeAddress" value="${esc(s.homeAddress)}"></label>
     <label class="f" style="max-width:240px">Aanwezig voor de aftrap (min)<input id="sf-arr" name="arriveBefore" type="number" min="0" step="5" value="${esc(s.arriveBefore)}"></label>
     <h3>Wedstrijdvorm</h3>
     <div class="grid2">
@@ -624,6 +664,16 @@ document.addEventListener("click", e => {
     case "logout": sb.auth.signOut(); break;
     case "copyshare": copy(shareUrl()); break;
     case "rotate": if (armed("rotate")) newShareLink(); break;
+    case "calctravel": {
+      const info = document.getElementById("travel-info"), btn = t; btn.disabled = true; info.hidden = false; info.textContent = "Bezig met berekenen…";
+      const addr = document.getElementById("mf-addr").value.trim(), opp = document.getElementById("mf-opp").value.trim();
+      calcTravel(addr, opp).then(r => {
+        document.getElementById("mf-travel").value = r.minutes;
+        ui.travelCalc = { minutes: r.minutes, km: r.km, label: r.label, addr };
+        info.textContent = "Berekend naar: " + r.label + " (" + r.km + " km, " + r.minutes + " min). Klopt de plek niet? Vul het adres in en bereken opnieuw.";
+      }).catch(e => { info.textContent = e.message || "Berekenen lukte niet."; }).finally(() => { btn.disabled = false; });
+      break; }
+    case "calcall": calcMissingTravel(); break;
     case "copybackup": copy(document.getElementById("backup").value); break;
     case "restore": try { S = normalize(JSON.parse(document.getElementById("backup").value)); save(); render(); toast("Back-up teruggezet."); } catch (x) { toast("Die tekst is geen geldige back-up."); } break;
     case "reset": if (armed("reset")) { S = DEFAULTS(); save(); ui.tab = "planning"; render(); toast("Alles gewist."); } break;
@@ -665,7 +715,11 @@ document.addEventListener("submit", e => {
   if (f.id === "matchform") {
     const id = f.dataset.id; const m = id ? S.matches.find(x => x.id === id) : { id: uid() };
     m.date = fd.get("date"); m.time = fd.get("time"); m.home = fd.get("home") === "1"; m.opponent = (fd.get("opponent") || "").trim();
-    m.address = m.home ? "" : (fd.get("address") || "").trim(); m.travel = m.home ? 0 : +fd.get("travel") || 0; m.absent = fd.getAll("absent");
+    const newAddr = m.home ? "" : (fd.get("address") || "").trim();
+    if (newAddr !== (m.address || "")) { m.travelPlace = ui.travelCalc && ui.travelCalc.addr === newAddr ? ui.travelCalc.label : ""; }
+    m.address = newAddr; m.travel = m.home ? 0 : +fd.get("travel") || 0; m.absent = fd.getAll("absent");
+    if (ui.travelCalc && !m.home && +ui.travelCalc.minutes === m.travel) { m.km = ui.travelCalc.km; m.travelPlace = ui.travelCalc.label; }
+    ui.travelCalc = null;
     if (!id) S.matches.push(m);
     if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid)));
     ui.editMatch = null; save(); render(); toast("Wedstrijd opgeslagen. Verdeel het taakschema opnieuw als er iets veranderd is.");
