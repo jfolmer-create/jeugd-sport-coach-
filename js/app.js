@@ -302,14 +302,17 @@ function bestByName(list, q, near) {
 // Voetbalclubs zoeken in OpenStreetMap (Overpass). Geeft [{name, lat, lon, city, street}].
 const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
 const qlSafe = x => x.replace(/[^\p{L}\p{N}'-]/gu, "");
-async function searchClubs(q) {
+async function searchClubs(q, near) {
   const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1);
   if (!words.length) return [];
   const rx = words.map(qlSafe).filter(Boolean).join(".*"); if (!rx) return [];
-  const ql = `[out:json][timeout:25];area["ISO3166-1"="NL"][admin_level=2]->.nl;
-(nwr["sport"~"soccer"]["club"]["name"~"${rx}",i](area.nl);
- nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i](area.nl);
- nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium"]["operator"~"${rx}",i](area.nl););
+  // zoekgebied: rond het eigen sportcomplex (snel), anders heel Nederland
+  const bb = near ? [near.lat - 1.2, near.lon - 1.8, near.lat + 1.2, near.lon + 1.8].map(x => x.toFixed(3)).join(",") : "50.7,3.2,53.7,7.3";
+  const ql = `[out:json][timeout:25][bbox:${bb}];
+(nwr["club"]["sport"~"soccer"]["name"~"${rx}",i];
+ nwr["club"="sport"]["name"~"${rx}",i]["sport"!~"."];
+ nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i];
+ nwr["leisure"~"sports_centre|pitch|stadium"]["operator"~"${rx}",i];);
 out center tags 80;`;
   let j = null;
   for (const ep of OVERPASS) {
@@ -373,16 +376,29 @@ async function pickClub(p, i) {
 }
 async function findOpponentClub(opponent, home) {
   const name = clubFromTeam(opponent); if (!name) return null;
-  const words = name.split(/\s+/).filter(w => normName(w).length > 2).sort((a, b) => b.length - a.length);
+  // losse woorden zonder clubafkortingen en cijfers, langste eerst (bv. "Olympia'28" -> "olympia")
+  const words = normWords(name).filter(w => w.length > 2 && !/^\d+$/.test(w)).sort((a, b) => b.length - a.length);
   for (const q of [name, words[0]].filter((x, i, a) => x && a.indexOf(x) === i)) {
     try {
-      let list = await searchClubs(q);
-      if (home) list = list.filter(c => distKm(home, c) < 250);
-      const c = bestByName(list, name, home); if (c && nameScore(c, name) > 0) return c;
-      if (c && q === words[0]) return c;
+      const list = await searchClubs(q, home);
+      const c = bestByName(list, name, home);
+      if (c && (nameScore(c, name) > 0 || q === words[0])) return c;
     } catch (e) {}
   }
+  // laatste poging: adreszoeker rond het eigen sportcomplex
+  for (const q of [name + " voetbal", name, words[0] && words[0] + " voetbal"].filter(Boolean)) {
+    await sleep(1100);
+    const g = await geocodeNear(q, home).catch(() => null);
+    if (g) return { name: g.label.split(",")[0], lat: g.lat, lon: g.lon, city: (g.label.split(",").slice(-4, -3)[0] || "").trim() };
+  }
   return null;
+}
+function normWords(x) { return String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean); }
+async function geocodeNear(q, near) {
+  const vb = near ? `&viewbox=${near.lon - 1.5},${near.lat + 1},${near.lon + 1.5},${near.lat - 1}&bounded=1` : "";
+  const r = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=nl&accept-language=nl" + vb + "&q=" + encodeURIComponent(q));
+  if (!r.ok) return null; const j = await r.json(); if (!j.length) return null;
+  return { lat: +j[0].lat, lon: +j[0].lon, label: j[0].display_name };
 }
 let travelBusy = false; const travelTried = new Set();
 function autoTravel() {
