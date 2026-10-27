@@ -119,3 +119,5 @@ label.btn { text-align: center; }
 button.pill.postog { border: 1px solid var(--line); cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; min-height: 32px; padding: 4px 10px; }
 button.pill.postog:not(.home) { background: none; color: var(--muted); }
 button.pill.postog.home { border-color: transparent; }
+.prefline { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; }
+.prefline select { width: auto; min-height: 32px; padding: 2px 8px; font-size: 13px; }
