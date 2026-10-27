@@ -204,7 +204,7 @@ const byDate = (a, b) => (a.date + a.time).localeCompare(b.date + b.time);
 const sorted = () => S.matches.slice().sort(byDate);
 const pById = id => S.players.find(p => p.id === id);
 const pName = id => (pById(id) || {}).name || "?";
-const parentLabel = id => { const p = pById(id); if (!p) return "?"; return p.parent ? p.parent + " (" + p.name + ")" : "ouder " + p.name; };
+const parentLabel = id => { const p = pById(id); if (!p) return "?"; return p.parent ? p.parent + " (" + p.name + ")" : "ouders van " + p.name; };
 const present = m => S.players.filter(p => !(m.absent || []).includes(p.id));
 const isPast = m => m.date < todayStr();
 function times(m) {
@@ -456,17 +456,37 @@ function planLineup(m) {
 }
 
 // ---------- WhatsApp text ----------
+function prevWash(m) {
+  const before = sorted().filter(x => byDate(x, m) < 0 && x.duties && (x.duties.wash || []).length);
+  return before.length ? before[before.length - 1].duties.wash : [];
+}
+// Bericht voor de groepsapp (WhatsApp: *vet*, _schuin_).
 function matchText(m) {
-  const t = times(m); const d = m.duties || {};
-  const lines = [];
-  lines.push("⚽ " + fmtDate(m.date) + " · " + (m.home ? "Thuis tegen " : "Uit bij ") + (m.opponent || "?"));
-  lines.push("Aftrap " + t.ko + ", aanwezig " + t.arrive + (m.home ? " op ons complex" : ""));
-  if (!m.home) { lines.push("Vertrek vanaf " + (S.settings.club || "de club") + ": " + t.depart); if (m.address) lines.push("Adres: " + m.address); }
-  if ((d.drive || []).length) lines.push("Rijden: " + d.drive.map(parentLabel).join(", "));
-  if ((d.flag || []).length) lines.push("Grensrechter: " + d.flag.map(parentLabel).join(", "));
-  if ((d.wash || []).length) lines.push("Wassen: " + d.wash.map(parentLabel).join(", "));
-  if ((m.absent || []).length) lines.push("Afwezig: " + m.absent.map(pName).join(", "));
-  return lines.join("\n");
+  const t = times(m); const d = m.duties || {}; const st = S.settings;
+  const own = [st.club, st.team].filter(Boolean).join(" ") || "Wij";
+  const day = (() => { try { return new Date(m.date + "T12:00").toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return m.date; } })();
+  const names = ids => ids.map(pName).join(" & ");
+  const L = [];
+  L.push("⚽ *Wedstrijd " + day + "* ⚽");
+  L.push("");
+  L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + (m.home ? " (thuis)" : " (uit)"));
+  if (!m.home) {
+    L.push("🚗 Vertrek vanaf ons sportcomplex: *" + t.depart + "*");
+    if ((d.drive || []).length) L.push("   Rijders: " + d.drive.map(parentLabel).join(", "));
+    if (m.address) L.push("📍 " + m.address);
+  }
+  L.push("⏰ Aanwezig: *" + t.arrive + "*" + (m.home ? " in de kleedkamer" : " bij " + (m.opponent ? clubFromTeam(m.opponent) || m.opponent : "de uitclub")));
+  L.push("🟢 Aftrap: *" + t.ko + "*");
+  if ((d.flag || []).length) L.push("🚩 Grensrechter: " + d.flag.map(parentLabel).join(", "));
+  const pw = prevWash(m).filter(id => pById(id));
+  if (st.washPerMatch) {
+    if (pw.length) L.push("🧺 Wastas mee naar de wedstrijd: *" + names(pw) + "*");
+    if ((d.wash || []).length) L.push("🧺 Wastas mee naar huis (wassen): *" + names(d.wash) + "*");
+  }
+  if ((m.absent || []).length) L.push("🤕 Afwezig: " + m.absent.map(pName).join(", "));
+  L.push("");
+  L.push("Kun je niet op je beurt? Ruil even met een andere ouder. Zet 'm op, " + (st.team || "team") + "! 💪");
+  return L.join("\n");
 }
 
 // ---------- rendering ----------
@@ -555,7 +575,7 @@ function matchCard(m, isNext) {
     ${!m.home && !+m.travel && canEdit() ? `<div class="notice">Nog geen reistijd, dus de vertrektijd klopt niet. <button class="btn" data-act="calcall">Bereken reistijden</button></div>` : ""}
     ${issues.map(i => `<div class="notice">${esc(i)}</div>`).join("")}
     <div class="row">
-      <button class="btn" data-act="copy" data-id="${m.id}">Kopieer voor WhatsApp</button>
+      <button class="btn" data-act="copy" data-id="${m.id}">Kopieer bericht voor de app</button>
       ${!m.home && m.address ? `<a class="btn ghost" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(m.address)}" target="_blank" rel="noopener">Route</a>` : ""}
       ${canEdit() ? `<button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig / afwezigen</button>
       <button class="btn ghost" data-act="lock" data-id="${m.id}">${m.locked ? "Losmaken" : "Vastzetten"}</button>
@@ -974,6 +994,6 @@ document.addEventListener("submit", e => {
   }
 });
 
-window.__tp = { get S() { return S; }, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
+window.__tp = { get S() { return S; }, matchText, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
 render(); init();
 })();
