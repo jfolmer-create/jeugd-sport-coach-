@@ -108,7 +108,7 @@ async function closeRound() {
   S.matches.filter(m => ids.includes(m.id)).forEach(m => {
     const abs = S.players.filter(p => cannotDo(m.id, p.id, "absent")).map(p => p.id);
     m.absent = [...new Set([...(m.absent || []), ...abs])];
-    if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid)));
+    if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid) && !cannotDo(m.id, pid, k)));
   });
   planDuties();
   S.matches.filter(m => ids.includes(m.id)).forEach(m => m.locked = true);
@@ -118,7 +118,7 @@ async function closeRound() {
 function roundText() {
   const ms = sorted().filter(m => round.matches.includes(m.id));
   return "Hoi allemaal! Het programma voor de komende periode is bekend (" + ms.length + " wedstrijden" + (ms.length ? ", " + fmtDate(ms[0].date) + " t/m " + fmtDate(ms[ms.length - 1].date) : "") + ").\n" +
-    "Geef via deze link door wanneer je kind er niet is:\n" + shareUrl() + "\n" +
+    "Geef via deze link door wanneer je kind er niet is, of wanneer jij als ouder er niet bent:\n" + shareUrl() + "\n" +
     "Daarna maak ik het taakschema. Kun je dan niet op je beurt, ruil dan zelf met een andere ouder.";
 }
 function roundCard() {
@@ -144,17 +144,20 @@ function parentCard() {
   let pid = ui.avChild; if (!pid) { try { pid = localStorage.getItem("teamplanner.child." + shareToken); } catch (e) {} }
   const p = pById(pid);
   const box = (m, what, label) => `<label><input type="checkbox" name="${m.id}" value="${what}" ${p && cannotDo(m.id, p.id, what) ? "checked" : ""}> ${label}</label>`;
-  return `<form class="card" id="availform"><h3>Geef door wanneer je kind er niet is</h3>
-    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink de wedstrijden aan waarbij je kind er niet is. Je kunt het aanpassen tot de coach het schema maakt.</p>
+  // "ouder is er niet" wordt bewaard als: kan niet rijden, vlaggen en wassen
+  const parentBox = m => `<label><input type="checkbox" name="${m.id}" value="parent" ${p && ["drive", "flag", "wash"].every(w => cannotDo(m.id, p.id, w)) ? "checked" : ""}> Ouder is er niet (geen taak)</label>`;
+  return `<form class="card" id="availform"><h3>Geef door wie er niet is</h3>
+    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink per wedstrijd aan of je kind er niet is, of dat jij als ouder er niet bent (dan krijg je die dag geen taak). Je kunt het aanpassen tot de coach het schema maakt.</p>
     <label class="f">Mijn kind<select id="av-child" data-act="avchild"><option value="">Kies…</option>${list.map(x => `<option value="${x.id}" ${p && p.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
-    ${p ? `<div class="checks" style="flex-direction:column">${ms.map(m => box(m, "absent", `${esc(p.name)} is er niet op <strong>${esc(fmtDate(m.date))}</strong> (${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)})`)).join("")}</div>
+    ${p ? `<div class="stack">${ms.map(m => `<div class="card" style="padding:10px"><strong>${esc(fmtDate(m.date))} · ${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)}</strong>
+      <div class="checks">${box(m, "absent", esc(p.name) + " is er niet")}${parentBox(m)}</div></div>`).join("")}</div>
       <div class="row"><button class="btn primary" type="submit">Doorgeven</button></div>` : ""}
   </form>`;
 }
 async function submitAvail(f) {
   const pid = document.getElementById("av-child").value; if (!pid) return;
   const fd = new FormData(f);
-  const entries = round.matches.map(mid => ({ match: mid, cannot: fd.getAll(mid) }));
+  const entries = round.matches.map(mid => { const v = fd.getAll(mid); const c = v.filter(x => x !== "parent"); if (v.includes("parent")) c.push("drive", "flag", "wash"); return { match: mid, cannot: c }; });
   const { data, error } = await sb.rpc("submit_availability", { token: shareToken, p_player: pid, entries });
   if (error || data === false) { toast("Doorgeven lukte niet. Misschien heeft de coach het schema al gemaakt."); return; }
   avail = avail.filter(a => a.player !== pid || !round.matches.includes(a.match)).concat(entries.map(e => ({ player: pid, match: e.match, cannot: e.cannot })));
