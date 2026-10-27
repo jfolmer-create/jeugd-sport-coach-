@@ -6,7 +6,7 @@ Een web-app voor coaches van jeugdteams. Hij werkt op telefoon en computer en je
 - **Wedstrijden** invoeren of in één keer plakken vanaf de clubsite. De app rekent de verzameltijd uit (standaard 45 minuten voor de aftrap). Bij uitwedstrijden berekent hij de reistijd (OpenStreetMap) en de vertrektijd vanaf het eigen sportcomplex, altijd naar beneden afgerond op 5 minuten.
 - **Taakschema**: met één knop eerlijk verdeeld over het seizoen, rekening houdend met afwezigen en wat ieder gezin kan.
 - **Wisselschema** per wedstrijd met posities. Kinderen met de minste speelminuten krijgen voorrang, zodat iedereen over het seizoen ongeveer even veel speelt.
-- **Kijklink voor ouders**: zij zien de tijden en taken, maar kunnen niets wijzigen.
+- **Kijklink voor ouders**: zij zien de tijden en taken. Is er een nieuw blok wedstrijden, dan opent de coach een *beschikbaarheidsronde*: ouders geven via dezelfde link door wanneer ze niet kunnen rijden, vlaggen of wassen, of hun kind er niet is. Sluit de coach de ronde, dan worden de taken ingedeeld en vastgezet; daarna ruilen ouders onderling (de coach past het aan via *Taken ruilen*).
 - Elke coach logt in met zijn e-mailadres en kan meerdere teams beheren. Bij een nieuw team zoek je je club op in de lijst van voetbalclubs; adres en wedstrijdvorm (op basis van de leeftijdscategorie) worden dan ingevuld.
 
 Clubs, adressen en routes komen uit OpenStreetMap (© OpenStreetMap-bijdragers, ODbL) via Overpass, Nominatim en OSRM.
@@ -27,7 +27,7 @@ Het is een statische website (HTML, CSS en JavaScript, zonder build-stap) die vi
 
 ### 1. Supabase
 1. Maak een gratis account op supabase.com en een nieuw project (regio Frankfurt).
-2. Open **SQL Editor → New query**, plak de inhoud van `supabase/schema.sql` en klik op **Run**.
+2. Open **SQL Editor → New query**, plak de inhoud van `supabase/schema.sql` en klik op **Run**. Doe dit opnieuw na elke update van dit bestand; het script kan veilig vaker draaien.
 3. Ga naar **Authentication → URL Configuration**:
    - *Site URL*: `https://jfolmer-create.github.io/jeugd-sport-coach-/`
    - *Redirect URLs*: voeg hetzelfde adres toe.

@@ -23,10 +23,63 @@ create policy "coach maakt teams"            on public.teams for insert to authe
 create policy "coach wijzigt eigen teams"    on public.teams for update to authenticated using (owner = auth.uid()) with check (owner = auth.uid());
 create policy "coach verwijdert eigen teams" on public.teams for delete to authenticated using (owner = auth.uid());
 
+-- Beschikbaarheidsronde: de coach zet een ronde open voor een aantal wedstrijden.
+alter table public.teams add column if not exists avail_open boolean not null default false;
+alter table public.teams add column if not exists avail_matches jsonb not null default '[]'::jsonb;
+
+-- Wat ouders doorgeven: per kind en wedstrijd welke taken ze niet kunnen (drive, flag, wash) of dat het kind er niet is (absent).
+create table if not exists public.availability (
+  team_id    uuid not null references public.teams(id) on delete cascade,
+  player_id  text not null,
+  match_id   text not null,
+  cannot     text[] not null default '{}',
+  updated_at timestamptz not null default now(),
+  primary key (team_id, player_id, match_id)
+);
+alter table public.availability enable row level security;
+drop policy if exists "coach leest beschikbaarheid" on public.availability;
+drop policy if exists "coach wist beschikbaarheid" on public.availability;
+create policy "coach leest beschikbaarheid" on public.availability for select to authenticated
+  using (exists (select 1 from public.teams t where t.id = team_id and t.owner = auth.uid()));
+create policy "coach wist beschikbaarheid" on public.availability for delete to authenticated
+  using (exists (select 1 from public.teams t where t.id = team_id and t.owner = auth.uid()));
+
+-- Ouders geven via de kijklink door wat ze niet kunnen. Alleen zolang de ronde open staat.
+create or replace function public.submit_availability(token text, p_player text, entries jsonb)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  t public.teams;
+  e jsonb;
+begin
+  select * into t from public.teams where share_token = token and length(token) >= 16;
+  if not found or not t.avail_open then return false; end if;
+  if not exists (select 1 from jsonb_array_elements(coalesce(t.data->'players', '[]'::jsonb)) p where p->>'id' = p_player) then
+    return false;
+  end if;
+  for e in select * from jsonb_array_elements(coalesce(entries, '[]'::jsonb)) loop
+    if t.avail_matches ? (e->>'match') then
+      insert into public.availability (team_id, player_id, match_id, cannot, updated_at)
+      values (t.id, p_player, e->>'match',
+              array(select x from jsonb_array_elements_text(coalesce(e->'cannot', '[]'::jsonb)) x where x in ('drive', 'flag', 'wash', 'absent')),
+              now())
+      on conflict (team_id, player_id, match_id) do update set cannot = excluded.cannot, updated_at = now();
+    end if;
+  end loop;
+  return true;
+end;
+$$;
+revoke all on function public.submit_availability(text, text, jsonb) from public;
+grant execute on function public.submit_availability(text, text, jsonb) to anon, authenticated;
+
 -- Kijklink voor ouders: alleen wie het geheime token kent, ziet het schema.
 -- Wisselschema's (speelminuten per kind) worden niet meegestuurd.
+drop function if exists public.get_shared_team(text);
 create or replace function public.get_shared_team(token text)
-returns table (name text, data jsonb, updated_at timestamptz)
+returns table (name text, data jsonb, updated_at timestamptz, avail_open boolean, avail_matches jsonb, availability jsonb)
 language sql
 stable
 security definer
@@ -36,7 +89,11 @@ as $$
          jsonb_set(t.data, '{matches}', coalesce(
            (select jsonb_agg(m - 'lineup' - 'played') from jsonb_array_elements(coalesce(t.data->'matches', '[]'::jsonb)) m),
            '[]'::jsonb)),
-         t.updated_at
+         t.updated_at,
+         t.avail_open,
+         t.avail_matches,
+         coalesce((select jsonb_agg(jsonb_build_object('player', a.player_id, 'match', a.match_id, 'cannot', to_jsonb(a.cannot)))
+                   from public.availability a where a.team_id = t.id), '[]'::jsonb)
   from public.teams t
   where t.share_token = token and length(token) >= 16;
 $$;

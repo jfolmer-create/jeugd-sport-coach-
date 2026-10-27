@@ -10,6 +10,9 @@ const DEFAULTS = () => ({
 let S = DEFAULTS();
 // mode: loading | local | login | newteam | cloud | shared | error
 let mode = "loading", sb = null, user = null, teams = [], teamId = null, saveTimer = null, saving = false, errorText = "";
+// beschikbaarheidsronde: wat ouders doorgeven en welke wedstrijden open staan
+let avail = [], round = { open: false, matches: [] }, shareToken = null;
+const cannotDo = (mid, pid, what) => avail.some(a => a.match === mid && a.player === pid && (a.cannot || []).includes(what));
 const ui = { tab: "planning", editMatch: null, editPlayer: null, lineupMatch: null, arm: null, loginSent: false, loginEmail: "" };
 try { const t = localStorage.getItem("teamplanner.tab"); if (t) ui.tab = t; } catch (e) {}
 const canEdit = () => mode === "local" || mode === "cloud";
@@ -45,7 +48,7 @@ function setSync(t) { const el = document.getElementById("sync"); if (el) el.tex
 
 async function init() {
   const params = new URLSearchParams(location.search);
-  const token = params.get("kijk");
+  const token = params.get("kijk"); shareToken = token;
   const cfg = window.TEAMPLANNER_CONFIG || {};
   if (cfg.supabaseUrl && cfg.supabaseAnonKey && window.supabase && window.supabase.createClient) {
     sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
@@ -55,7 +58,7 @@ async function init() {
     const { data, error } = await sb.rpc("get_shared_team", { token });
     const row = Array.isArray(data) ? data[0] : data;
     if (error || !row) { mode = "error"; errorText = "Deze kijklink werkt niet (meer). Vraag de coach om een nieuwe link."; return render(); }
-    S = normalize(row.data); mode = "shared"; ui.tab = "planning"; render(); setSync("Alleen bekijken");
+    S = normalize(row.data); avail = row.availability || []; round = { open: !!row.avail_open, matches: row.avail_matches || [] }; mode = "shared"; ui.tab = "planning"; render(); setSync("Alleen bekijken");
     return;
   }
   if (!sb) { S = readLocal(LS_KEY) || DEFAULTS(); mode = "local"; render(); setSync("Op dit apparaat"); return; }
@@ -69,7 +72,7 @@ async function init() {
   else if (!user) { mode = "login"; render(); }
 }
 async function loadTeams() {
-  const { data, error } = await sb.from("teams").select("id,name,share_token,updated_at").order("created_at");
+  const { data, error } = await sb.from("teams").select("id,name,share_token,updated_at,avail_open,avail_matches").order("created_at");
   if (error) { mode = "error"; errorText = "Kan je teams niet laden: " + error.message; return render(); }
   teams = data || [];
   if (!teams.length) { mode = "newteam"; return render(); }
@@ -81,9 +84,86 @@ async function loadTeam(id) {
   const { data, error } = await sb.from("teams").select("data").eq("id", id).single();
   if (error) { mode = "error"; errorText = "Kan dit team niet laden: " + error.message; return render(); }
   teamId = id; S = normalize(data.data); mode = "cloud";
+  const t = teams.find(x => x.id === id) || {}; round = { open: !!t.avail_open, matches: t.avail_matches || [] };
+  await loadAvail();
   try { localStorage.setItem("teamplanner.team", id); } catch (e) {}
   ui.editMatch = ui.editPlayer = ui.lineupMatch = null;
   render(); setSync("Opgeslagen");
+}
+async function loadAvail() {
+  if (mode !== "cloud") return;
+  const { data } = await sb.from("availability").select("player_id,match_id,cannot").eq("team_id", teamId);
+  avail = (data || []).map(a => ({ player: a.player_id, match: a.match_id, cannot: a.cannot || [] }));
+}
+async function setRound(open, matches) {
+  const { error } = await sb.from("teams").update({ avail_open: open, avail_matches: matches }).eq("id", teamId);
+  if (error) { toast("Dat lukte niet: " + error.message); return false; }
+  round = { open, matches }; const t = teams.find(x => x.id === teamId); if (t) { t.avail_open = open; t.avail_matches = matches; }
+  return true;
+}
+async function closeRound() {
+  await loadAvail();
+  if (!await setRound(false, round.matches)) return;
+  const ids = round.matches;
+  S.matches.filter(m => ids.includes(m.id)).forEach(m => {
+    const abs = S.players.filter(p => cannotDo(m.id, p.id, "absent")).map(p => p.id);
+    m.absent = [...new Set([...(m.absent || []), ...abs])];
+    m.locked = false;
+  });
+  planDuties();
+  S.matches.filter(m => ids.includes(m.id)).forEach(m => m.locked = true);
+  save(); render(); toast("Ronde gesloten en taken ingedeeld. Deze wedstrijden staan nu vast.");
+}
+function roundText() {
+  const ms = sorted().filter(m => round.matches.includes(m.id));
+  return "Hoi allemaal! Het programma voor de komende periode is bekend (" + ms.length + " wedstrijden" + (ms.length ? ", " + fmtDate(ms[0].date) + " t/m " + fmtDate(ms[ms.length - 1].date) : "") + ").\n" +
+    "Geef via deze link door wanneer je niet kunt rijden, vlaggen of wassen, of wanneer je kind er niet is:\n" + shareUrl() + "\n" +
+    "Daarna maak ik het schema. Kun je dan toch niet, ruil dan zelf met een andere ouder.";
+}
+function roundCard() {
+  if (mode !== "cloud") return "";
+  const up = sorted().filter(m => m.date >= todayStr());
+  if (round.open) {
+    const fam = S.players; const done = fam.filter(p => avail.some(a => a.player === p.id && round.matches.includes(a.match)));
+    const todo = fam.filter(p => !done.includes(p));
+    return `<div class="card"><div class="row between"><h3>Beschikbaarheid ouders</h3><span class="pill ok">ronde open</span></div>
+      <p class="small">${round.matches.length} wedstrijden. <strong>${done.length} van ${fam.length}</strong> gezinnen hebben gereageerd.${todo.length ? ` <span class="muted">Nog niet: ${todo.map(p => esc(p.name)).join(", ")}.</span>` : ""}</p>
+      <div class="row"><button class="btn" data-act="roundcopy">Kopieer bericht voor ouders</button><button class="btn ghost" data-act="roundrefresh">Vernieuwen</button>
+      <button class="btn ${ui.arm === "roundclose" ? "arm" : "primary"}" data-act="roundclose">${ui.arm === "roundclose" ? "Zeker? Ouders kunnen daarna niets meer doorgeven" : "Sluiten en taken indelen"}</button></div></div>`;
+  }
+  if (ui.roundSetup) {
+    return `<div class="card"><h3>Nieuwe ronde: voor welke wedstrijden?</h3>
+      <div class="checks" style="flex-direction:column">${up.map(m => `<label><input type="checkbox" name="roundm" value="${m.id}" ${m.locked ? "" : "checked"}> ${esc(fmtDate(m.date))} · ${m.home ? "thuis" : "uit"} · ${esc(m.opponent)}${m.locked ? ' <span class="pill lock">vastgezet</span>' : ""}</label>`).join("")}</div>
+      <div class="row"><button class="btn primary" data-act="roundopen">Ronde openen</button><button class="btn ghost" data-act="roundcancel">Annuleren</button></div></div>`;
+  }
+  return `<div class="card"><h3>Beschikbaarheid ouders</h3>
+    <p class="small muted">Nieuw blok wedstrijden bekend? Open een ronde en stuur de link naar de ouders. Zij geven door wanneer ze niet kunnen. Daarna sluit je de ronde en deelt de planner de taken in. Vanaf dan ruilen ouders onderling.</p>
+    <div class="row"><button class="btn" data-act="roundsetup" ${up.length ? "" : "disabled"}>Nieuwe ronde starten</button></div></div>`;
+}
+function parentCard() {
+  if (mode !== "shared") return "";
+  if (!round.open) return `<div class="notice">Het schema staat vast. Kun je niet op je beurt? Ruil zelf met een andere ouder en laat het de coach weten.</div>`;
+  const ms = sorted().filter(m => round.matches.includes(m.id));
+  const list = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  let pid = ui.avChild; if (!pid) { try { pid = localStorage.getItem("teamplanner.child." + shareToken); } catch (e) {} }
+  const p = pById(pid);
+  const box = (m, what, label) => `<label><input type="checkbox" name="${m.id}" value="${what}" ${p && cannotDo(m.id, p.id, what) ? "checked" : ""}> ${label}</label>`;
+  return `<form class="card" id="availform"><h3>Geef door wanneer je niet kunt</h3>
+    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink aan wat bij jullie niet lukt. Je kunt het aanpassen tot de coach het schema maakt.</p>
+    <label class="f">Mijn kind<select id="av-child" data-act="avchild"><option value="">Kies…</option>${list.map(x => `<option value="${x.id}" ${p && p.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+    ${p ? `<div class="stack">${ms.map(m => `<div class="card" style="padding:10px"><strong>${esc(fmtDate(m.date))} · ${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)}</strong>
+      <div class="checks">${box(m, "absent", esc(p.name) + " is er niet")}${!m.home && p.canDrive ? box(m, "drive", "Kan niet rijden") : ""}${(m.home || S.settings.flagAway) && p.canFlag ? box(m, "flag", "Kan geen grensrechter zijn") : ""}${S.settings.washPerMatch && p.canWash ? box(m, "wash", "Kan niet wassen") : ""}</div></div>`).join("")}</div>
+      <div class="row"><button class="btn primary" type="submit">Doorgeven</button></div>` : ""}
+  </form>`;
+}
+async function submitAvail(f) {
+  const pid = document.getElementById("av-child").value; if (!pid) return;
+  const fd = new FormData(f);
+  const entries = round.matches.map(mid => ({ match: mid, cannot: fd.getAll(mid) }));
+  const { data, error } = await sb.rpc("submit_availability", { token: shareToken, p_player: pid, entries });
+  if (error || data === false) { toast("Doorgeven lukte niet. Misschien heeft de coach het schema al gemaakt."); return; }
+  avail = avail.filter(a => a.player !== pid || !round.matches.includes(a.match)).concat(entries.map(e => ({ player: pid, match: e.match, cannot: e.cannot })));
+  toast("Doorgegeven, dank je wel!"); render();
 }
 async function createTeam(fd) {
   const fromLocal = fd.has("fromLocal");
@@ -96,7 +176,7 @@ async function createTeam(fd) {
   const pk = ui.clubPick; if (pk && pk.address === data.settings.homeAddress) data.settings.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
   ui.clubPick = null; ui.clubSearch = null;
   const name = [data.settings.club, data.settings.team].filter(Boolean).join(" ");
-  const { data: row, error } = await sb.from("teams").insert({ name: name || "Mijn team", data }).select("id,name,share_token,updated_at").single();
+  const { data: row, error } = await sb.from("teams").insert({ name: name || "Mijn team", data }).select("id,name,share_token,updated_at,avail_open,avail_matches").single();
   if (error) { toast("Team aanmaken lukte niet: " + error.message); return; }
   teams.push(row); ui.tab = fromLocal ? "planning" : "settings"; await loadTeam(row.id);
 }
@@ -264,9 +344,9 @@ function planDuties(onlyFuture = true) {
   };
   list.forEach((m, i) => {
     if (m.locked || (onlyFuture && m.date < today)) { tally(m, i); return; }
-    const pres = present(m); const used = new Set(); const duties = { drive: [], flag: [], wash: [] };
+    const pres = present(m).filter(p => !cannotDo(m.id, p.id, "absent")); const used = new Set(); const duties = { drive: [], flag: [], wash: [] };
     const pick = (duty, can) => {
-      const cands = pres.filter(p => can(p) && count[p.id]);
+      const cands = pres.filter(p => can(p) && count[p.id] && !cannotDo(m.id, p.id, duty));
       if (!cands.length) return null;
       cands.sort((a, b) => (used.has(a.id) - used.has(b.id)) || (count[a.id][duty] - count[b.id][duty]) ||
         (last[a.id][duty] - last[b.id][duty]) || a.name.localeCompare(b.name));
@@ -473,6 +553,7 @@ function matchCard(m, isNext) {
       ${S.settings.washPerMatch ? dutyRow("Wassen", d.wash) : ""}
       ${(m.absent || []).length ? `<div class="duty"><span>Afwezig</span><div class="names">${m.absent.map(id => `<span class="pill warn">${esc(pName(id))}</span>`).join("")}</div></div>` : ""}
     </div>
+    ${ui.editDuties === m.id && canEdit() ? dutyEditor(m) : ""}
     ${!m.home && !+m.travel && canEdit() ? `<div class="notice">Nog geen reistijd, dus de vertrektijd klopt niet. <button class="btn" data-act="calcall">Bereken reistijden</button></div>` : ""}
     ${issues.map(i => `<div class="notice">${esc(i)}</div>`).join("")}
     <div class="row">
@@ -480,8 +561,18 @@ function matchCard(m, isNext) {
       ${!m.home && m.address ? `<a class="btn ghost" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(m.address)}" target="_blank" rel="noopener">Route</a>` : ""}
       ${canEdit() ? `<button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig / afwezigen</button>
       <button class="btn ghost" data-act="lock" data-id="${m.id}">${m.locked ? "Losmaken" : "Vastzetten"}</button>
-      <button class="btn ghost" data-act="tolineup" data-id="${m.id}">Wisselschema</button>` : ""}
+      <button class="btn ghost" data-act="tolineup" data-id="${m.id}">Wisselschema</button>
+      <button class="btn ghost" data-act="editduties" data-id="${m.id}">${ui.editDuties === m.id ? "Klaar met ruilen" : "Taken ruilen"}</button>` : ""}
     </div></article>`;
+}
+function dutyEditor(m) {
+  const d = m.duties || {}; const fams = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const sel = (duty, i, val) => `<select id="de-${m.id}-${duty}-${i}" data-act="dutyset" data-m="${m.id}" data-d="${duty}" data-i="${i}" aria-label="${DUTY[duty]} ${i + 1}">
+    <option value="">${val ? "— weghalen —" : "+ toevoegen"}</option>${fams.map(p => `<option value="${p.id}" ${p.id === val ? "selected" : ""}>${esc(parentLabel(p.id))}</option>`).join("")}</select>`;
+  const row = (duty, multi) => { const cur = d[duty] || []; const slots = multi ? cur.concat([""]) : (cur.length ? cur : [""]);
+    return `<div class="duty"><span>${DUTY[duty]}</span><div class="stack">${slots.map((v, i) => sel(duty, i, v)).join("")}</div></div>`; };
+  return `<div class="card" style="padding:10px;background:var(--bg)"><p class="small muted">Ruilen ouders onderling? Pas het hier aan. Deze wedstrijd blijft daarna zoals jij hem instelt.</p><div class="duties">
+    ${m.home ? "" : row("drive", true)}${(m.home || S.settings.flagAway) ? row("flag", false) : ""}${S.settings.washPerMatch ? row("wash", false) : ""}</div></div>`;
 }
 function vPlanning() {
   if (!S.players.length && !S.matches.length) return canEdit() ? emptyStart() : `<div class="card empty"><p class="muted">De coach heeft nog geen wedstrijden ingepland.</p></div>`;
@@ -489,8 +580,8 @@ function vPlanning() {
   const noDuty = up.filter(m => !m.duties).length;
   return `<div class="row between"><div><h2>Komende wedstrijden</h2><p class="muted small">Aanwezig ${S.settings.arriveBefore} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.</p></div>
     ${canEdit() ? `<button class="btn primary" data-act="plan">${noDuty ? "Maak taakschema" : "Taakschema opnieuw verdelen"}</button>` : ""}</div>
-    ${canEdit() ? "" : `<p class="small muted">Kun je niet op je beurt? Laat het de coach op tijd weten, dan wordt er geruild.</p>`}
     <p class="muted small" ${canEdit() ? "" : "hidden"}>Vastgezette en gespeelde wedstrijden blijven zoals ze zijn. De rest wordt eerlijk verdeeld: wie het minst vaak aan de beurt was, gaat voor.</p>
+    ${roundCard()}${parentCard()}
     ${up.length ? up.map((m, i) => matchCard(m, i === 0)).join("") : `<div class="card empty"><p class="muted">Nog geen komende wedstrijden.</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
     ${up.length ? `<div class="row"><button class="btn" data-act="copyall">Kopieer hele schema</button>${canEdit() && up.some(m => !m.home && !+m.travel) ? '<button class="btn" data-act="calcall">Bereken ontbrekende reistijden</button>' : ""}</div>` : ""}`;
 }
@@ -791,6 +882,15 @@ document.addEventListener("click", e => {
       }).catch(e => { info.textContent = e.message || "Berekenen lukte niet."; }).finally(() => { btn.disabled = false; });
       break; }
     case "calcall": calcMissingTravel(); break;
+    case "editduties": ui.editDuties = ui.editDuties === id ? null : id; render(); break;
+    case "roundsetup": ui.roundSetup = true; render(); break;
+    case "roundcancel": ui.roundSetup = false; render(); break;
+    case "roundopen": { const ids = [...document.querySelectorAll('input[name="roundm"]:checked')].map(x => x.value);
+      if (!ids.length) { toast("Kies minstens één wedstrijd."); break; }
+      setRound(true, ids).then(ok => { if (ok) { ui.roundSetup = false; render(); toast("Ronde geopend. Kopieer het bericht en stuur het naar de ouders."); } }); break; }
+    case "roundcopy": copy(roundText()); break;
+    case "roundrefresh": loadAvail().then(() => { render(); toast("Bijgewerkt."); }); break;
+    case "roundclose": if (armed("roundclose")) closeRound(); break;
     case "clubsearch": doClubSearch(t.dataset.p); break;
     case "clubpick": pickClub(t.dataset.p, +t.dataset.i); break;
     case "copybackup": copy(document.getElementById("backup").value); break;
@@ -836,6 +936,10 @@ document.addEventListener("change", e => {
     if (m.lineup && !m.played) { planLineup(m); toast(key === "absent" && on ? "Wisselschema aangepast. Kijk ook even naar het taakschema." : "Wisselschema aangepast."); }
     save(); render(); return;
   }
+  if (t.dataset.act === "dutyset") { const m = S.matches.find(x => x.id === t.dataset.m); m.duties = m.duties || { drive: [], flag: [], wash: [] };
+    const arr = (m.duties[t.dataset.d] || []).slice(); arr[+t.dataset.i] = t.value; m.duties[t.dataset.d] = arr.filter(Boolean);
+    m.locked = true; save(); render(); return; }
+  if (t.dataset.act === "avchild") { ui.avChild = t.value; try { localStorage.setItem("teamplanner.child." + shareToken, t.value); } catch (x) {} render(); return; }
   if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
     if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); } save(); render(); return; }
   if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.lineup.cells[t.dataset.p][+t.dataset.b] = t.value; save(); render(); }
@@ -846,6 +950,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("submit", e => {
   e.preventDefault(); const f = e.target; const fd = new FormData(f);
   if (f.id === "loginform") { login(fd); return; }
+  if (f.id === "availform") { submitAvail(f); return; }
   if (f.id === "newteamform") { createTeam(fd); return; }
   if (f.id === "matchform") {
     const id = f.dataset.id; const m = id ? S.matches.find(x => x.id === id) : { id: uid() };
