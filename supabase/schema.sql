@@ -99,3 +99,16 @@ as $$
 $$;
 revoke all on function public.get_shared_team(text) from public;
 grant execute on function public.get_shared_team(text) to anon, authenticated;
+
+-- Logo en teamfoto: openbare opslag, alleen de coach van het team mag uploaden of verwijderen.
+-- Bestanden staan in de map <team-id>/ in de bucket team-media.
+insert into storage.buckets (id, name, public) values ('team-media', 'team-media', true) on conflict (id) do nothing;
+drop policy if exists "coach uploadt teammedia" on storage.objects;
+drop policy if exists "coach wijzigt teammedia" on storage.objects;
+drop policy if exists "coach verwijdert teammedia" on storage.objects;
+create policy "coach uploadt teammedia" on storage.objects for insert to authenticated
+  with check (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+create policy "coach wijzigt teammedia" on storage.objects for update to authenticated
+  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+create policy "coach verwijdert teammedia" on storage.objects for delete to authenticated
+  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));

@@ -163,6 +163,47 @@ async function submitAvail(f) {
   avail = avail.filter(a => a.player !== pid || !round.matches.includes(a.match)).concat(entries.map(e => ({ player: pid, match: e.match, cannot: e.cannot })));
   toast("Doorgegeven, dank je wel!"); render();
 }
+// ---------- logo en teamfoto ----------
+function resizeImage(file, max, type, quality) {
+  return new Promise((res, rej) => {
+    const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const sc = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement("canvas");
+      c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => b ? res(b) : rej(new Error("Omzetten mislukt")), type, quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("Dit bestand is geen afbeelding die de browser kan lezen.")); };
+    img.src = url;
+  });
+}
+const blobToDataUrl = b => new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
+async function uploadMedia(kind, file) {
+  const isLogo = kind === "logo";
+  toast(isLogo ? "Logo uploaden…" : "Teamfoto uploaden…");
+  try {
+    const blob = await resizeImage(file, isLogo ? 256 : 1600, isLogo ? "image/png" : "image/jpeg", 0.85);
+    const key = isLogo ? "logoUrl" : "photoUrl"; let url;
+    if (mode === "cloud") {
+      const path = teamId + "/" + kind + "-" + Date.now() + (isLogo ? ".png" : ".jpg");
+      const { error } = await sb.storage.from("team-media").upload(path, blob, { contentType: blob.type, upsert: true });
+      if (error) throw new Error("Uploaden lukte niet (" + error.message + "). Is het databasescript al opnieuw uitgevoerd?");
+      url = sb.storage.from("team-media").getPublicUrl(path).data.publicUrl;
+      await removeMedia(kind, true);
+    } else {
+      url = await blobToDataUrl(isLogo ? blob : await resizeImage(file, 800, "image/jpeg", 0.75));
+    }
+    S.settings[key] = url; save(); render(); toast(isLogo ? "Logo opgeslagen." : "Teamfoto opgeslagen.");
+  } catch (e) { toast(e.message || "Uploaden lukte niet."); }
+}
+async function removeMedia(kind, quiet) {
+  const key = kind === "logo" ? "logoUrl" : "photoUrl"; const url = S.settings[key];
+  if (url && mode === "cloud" && url.includes("/team-media/")) {
+    const path = decodeURIComponent(url.split("/team-media/")[1].split("?")[0]);
+    await sb.storage.from("team-media").remove([path]);
+  }
+  if (!quiet) { S.settings[key] = ""; save(); render(); toast("Verwijderd."); }
+}
 async function createTeam(fd) {
   const fromLocal = fd.has("fromLocal");
   const data = fromLocal ? (readLocal(LS_KEY) || DEFAULTS()) : DEFAULTS();
@@ -501,7 +542,8 @@ function matchText(m) {
 const TABS = [["planning", "Planning"], ["matches", "Wedstrijden"], ["players", "Spelers"], ["lineup", "Wissels"], ["season", "Seizoen"], ["settings", "Instellingen"]];
 function render() {
   const s = S.settings; const inTeam = ["local", "cloud", "shared"].includes(mode);
-  document.getElementById("brand").innerHTML = inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || "Jeugdvoetbal") + "</small>" : "Teamplanner<small>Jeugdvoetbal</small>";
+  document.getElementById("brand").innerHTML = (inTeam && s.logoUrl ? `<img class="logo" src="${esc(s.logoUrl)}" alt="">` : "") +
+    "<span>" + (inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || "Jeugdvoetbal") + "</small>" : "Teamplanner<small>Jeugdvoetbal</small>") + "</span>";
   const tabs = mode === "shared" ? TABS.filter(t => t[0] === "planning") : inTeam ? TABS : [];
   document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${l}</button>`).join("");
   const main = document.getElementById("main");
@@ -604,7 +646,8 @@ function vPlanning() {
   if (!S.players.length && !S.matches.length) return canEdit() ? emptyStart() : `<div class="card empty"><p class="muted">De coach heeft nog geen wedstrijden ingepland.</p></div>`;
   const today = todayStr(); const up = sorted().filter(m => m.date >= today);
   const noDuty = up.filter(m => !m.duties).length;
-  return `<div class="row between"><div><h2>Komende wedstrijden</h2><p class="muted small">Aanwezig ${S.settings.arriveBefore} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.</p></div>
+  return `${S.settings.photoUrl ? `<img class="teamphoto" src="${esc(S.settings.photoUrl)}" alt="Teamfoto ${esc(S.settings.team)}">` : ""}
+    <div class="row between"><div><h2>Komende wedstrijden</h2><p class="muted small">Aanwezig ${S.settings.arriveBefore} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.</p></div>
     ${canEdit() ? `<button class="btn primary" data-act="plan">${noDuty ? "Maak taakschema" : "Taakschema opnieuw verdelen"}</button>` : ""}</div>
     <p class="muted small" ${canEdit() ? "" : "hidden"}>Vastgezette en gespeelde wedstrijden blijven zoals ze zijn. De rest wordt eerlijk verdeeld: wie het minst vaak aan de beurt was, gaat voor.</p>
     ${roundCard()}${parentCard()}
@@ -747,6 +790,18 @@ function vSeason() {
 function vSettings() {
   const s = S.settings;
   return `<h2>Instellingen</h2>
+  <div class="card"><h3>Logo en teamfoto</h3>
+    <p class="small muted">Het logo staat bovenin de app, de teamfoto boven de wedstrijden. Ouders zien ze ook via de kijklink.</p>
+    <div class="media-grid">
+      <div class="stack"><span class="small muted">Clublogo</span>
+        <div class="media-prev logo-prev">${s.logoUrl ? `<img src="${esc(s.logoUrl)}" alt="Clublogo">` : '<span class="muted small">Nog geen logo</span>'}</div>
+        <label class="btn" for="up-logo">${s.logoUrl ? "Ander logo" : "Logo kiezen"}</label><input id="up-logo" type="file" accept="image/*" data-upload="logo" hidden>
+        ${s.logoUrl ? '<button class="btn ghost danger" data-act="rmmedia" data-kind="logo">Logo verwijderen</button>' : ""}</div>
+      <div class="stack"><span class="small muted">Teamfoto</span>
+        <div class="media-prev photo-prev">${s.photoUrl ? `<img src="${esc(s.photoUrl)}" alt="Teamfoto">` : '<span class="muted small">Nog geen teamfoto</span>'}</div>
+        <label class="btn" for="up-photo">${s.photoUrl ? "Andere foto" : "Foto kiezen"}</label><input id="up-photo" type="file" accept="image/*" data-upload="photo" hidden>
+        ${s.photoUrl ? '<button class="btn ghost danger" data-act="rmmedia" data-kind="photo">Foto verwijderen</button>' : ""}</div>
+    </div></div>
   <form class="card" id="settingsform"><h3>Club en team</h3>
     ${clubSearchBlock("sf")}
     <div class="grid2">
@@ -861,7 +916,8 @@ function loadSample() {
   const opp = [["SV Oranje JO11-1", 1, "", 0, "09:00"], ["VV Zuidwijk JO11-3", 0, "Sportpark Zuid, Zuidwijk", 25, "10:30"], ["FC Polder JO11-2", 1, "", 0, "08:45"], ["RKSV De Hoeve JO11-1", 0, "Sportlaan 4, Hoeve", 35, "11:00"], ["SC Dijkzicht JO11-2", 1, "", 0, "09:30"], ["VV Zuidwijk JO11-3", 0, "Sportpark Zuid, Zuidwijk", 25, "09:15"]];
   const matches = opp.map(([o, h, a, t, time], i) => { const d = new Date(base); d.setDate(d.getDate() + 7 * i);
     return { id: uid(), date: d.toISOString().slice(0, 10), time, home: !!h, opponent: o, address: a, travel: t, absent: i === 1 ? [players[3].id] : [] }; });
-  S = normalize({ settings: { club: "VV Voorbeeld", team: "JO11-2 (voorbeeld)", homeAddress: "Sportpark Voorbeeld, Dorp" }, players, matches });
+  const keep = { logoUrl: S.settings.logoUrl || "", photoUrl: S.settings.photoUrl || "" };
+  S = normalize({ settings: { ...keep, club: "VV Voorbeeld", team: "JO11-2 (voorbeeld)", homeAddress: "Sportpark Voorbeeld, Dorp" }, players, matches });
   planDuties(); save(); ui.tab = "planning"; render(); toast("Voorbeeldteam geladen. Wis het via Instellingen.");
 }
 
@@ -913,6 +969,7 @@ document.addEventListener("click", e => {
       }).catch(e => { info.textContent = e.message || "Berekenen lukte niet."; }).finally(() => { btn.disabled = false; });
       break; }
     case "calcall": calcMissingTravel(); break;
+    case "rmmedia": if (armed("rm" + t.dataset.kind)) removeMedia(t.dataset.kind); break;
     case "editduties": ui.editDuties = ui.editDuties === id ? null : id; render(); break;
     case "roundopen": { const ids = sorted().filter(m => m.date >= todayStr()).map(m => m.id);
       setRound(true, ids).then(ok => { if (ok) { render(); toast("Ronde geopend voor " + ids.length + " wedstrijden. Kopieer het bericht voor de ouders."); } }); break; }
@@ -967,6 +1024,7 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "dutyset") { const m = S.matches.find(x => x.id === t.dataset.m); m.duties = m.duties || { drive: [], flag: [], wash: [] };
     const arr = (m.duties[t.dataset.d] || []).slice(); arr[+t.dataset.i] = t.value; m.duties[t.dataset.d] = arr.filter(Boolean);
     m.locked = true; save(); render(); return; }
+  if (t.dataset.upload && t.files && t.files[0]) { uploadMedia(t.dataset.upload, t.files[0]); t.value = ""; return; }
   if (t.dataset.act === "avchild") { ui.avChild = t.value; try { localStorage.setItem("teamplanner.child." + shareToken, t.value); } catch (x) {} render(); return; }
   if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
     if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); } save(); render(); return; }
