@@ -7,7 +7,9 @@ Een web-app voor coaches van jeugdteams. Hij werkt op telefoon en computer en je
 - **Taakschema**: met één knop eerlijk verdeeld over het seizoen, rekening houdend met afwezigen en wat ieder gezin kan.
 - **Wisselschema** per wedstrijd met posities. Kinderen met de minste speelminuten krijgen voorrang, zodat iedereen over het seizoen ongeveer even veel speelt.
 - **Kijklink voor ouders**: zij zien de tijden en taken, maar kunnen niets wijzigen.
-- Elke coach logt in met zijn e-mailadres en kan meerdere teams beheren.
+- Elke coach logt in met zijn e-mailadres en kan meerdere teams beheren. Bij een nieuw team zoek je je club op in de lijst van voetbalclubs; adres en wedstrijdvorm (op basis van de leeftijdscategorie) worden dan ingevuld.
+
+Clubs, adressen en routes komen uit OpenStreetMap (© OpenStreetMap-bijdragers, ODbL) via Overpass, Nominatim en OSRM.
 
 ## Hoe het werkt
 

@@ -85,9 +85,17 @@ async function loadTeam(id) {
   ui.editMatch = ui.editPlayer = ui.lineupMatch = null;
   render(); setSync("Opgeslagen");
 }
-async function createTeam(name, fromLocal) {
+async function createTeam(fd) {
+  const fromLocal = fd.has("fromLocal");
   const data = fromLocal ? (readLocal(LS_KEY) || DEFAULTS()) : DEFAULTS();
-  if (!fromLocal) { const parts = name.trim().split(/\s+/); data.settings.team = parts.length > 1 ? parts.pop() : ""; data.settings.club = parts.join(" ") || name; }
+  const club = (fd.get("club") || "").trim(), team = (fd.get("team") || "").trim(), address = (fd.get("address") || "").trim();
+  if (club) data.settings.club = club; if (team) data.settings.team = team; if (address) data.settings.homeAddress = address;
+  const age = +((team.match(/(?:JO|MO|O)\s?(\d{1,2})/i) || [])[1] || 0);
+  const pre = !fromLocal && age ? (age <= 9 ? 0 : age <= 11 ? 1 : age === 13 ? 2 : age <= 15 && age >= 14 ? 3 : age <= 17 && age >= 16 ? 4 : age >= 18 ? 5 : -1) : -1;
+  if (pre >= 0) { const P = PRESETS[pre]; Object.assign(data.settings, { onField: P[1], matchMinutes: P[2], blocks: P[3], formation: P[4] }); }
+  const pk = ui.clubPick; if (pk && pk.address === data.settings.homeAddress) data.settings.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
+  ui.clubPick = null; ui.clubSearch = null;
+  const name = [data.settings.club, data.settings.team].filter(Boolean).join(" ");
   const { data: row, error } = await sb.from("teams").insert({ name: name || "Mijn team", data }).select("id,name,share_token,updated_at").single();
   if (error) { toast("Team aanmaken lukte niet: " + error.message); return; }
   teams.push(row); ui.tab = fromLocal ? "planning" : "settings"; await loadTeam(row.id);
@@ -141,16 +149,89 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Geeft { minutes, km, label, query } of gooit een Error met een Nederlandse melding.
 async function calcTravel(address, opponent) {
   if (!S.settings.homeAddress) throw new Error("Vul eerst het adres van je eigen sportcomplex in bij Instellingen.");
-  const home = await geocode(S.settings.homeAddress);
+  const hc = S.settings.homeCoords;
+  const home = hc && hc.address === S.settings.homeAddress ? hc : await geocode(S.settings.homeAddress);
   if (!home) throw new Error("Het adres van je eigen sportcomplex is niet gevonden. Pas het aan bij Instellingen (bv. straat en plaats).");
   const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
   let dest = null, query = "";
-  for (const q of tries) { await sleep(1100); dest = await geocode(q); if (dest) { query = q; break; } }
+  if (!address) { const c = await findOpponentClub(opponent, home); if (c) { dest = { lat: c.lat, lon: c.lon, label: c.name + (c.city ? ", " + c.city : "") }; query = c.name; } }
+  if (!dest) for (const q of tries) { await sleep(1100); dest = await geocode(q); if (dest) { query = q; break; } }
   if (!dest) throw new Error("Het adres van de uitclub is niet gevonden. Vul het adres in (straat en plaats).");
   const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${home.lon},${home.lat};${dest.lon},${dest.lat}?overview=false`);
   const j = r.ok ? await r.json() : null;
   if (!j || !j.routes || !j.routes.length) throw new Error("Er is geen route gevonden.");
   return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query };
+}
+// Voetbalclubs zoeken in OpenStreetMap (Overpass). Geeft [{name, lat, lon, city, street}].
+const OVERPASS = "https://overpass-api.de/api/interpreter";
+const qlSafe = x => x.replace(/[^\p{L}\p{N}'-]/gu, "");
+async function searchClubs(q) {
+  const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/\s+/).filter(w => w.length > 1);
+  if (!words.length) return [];
+  const rx = words.map(qlSafe).filter(Boolean).join(".*"); if (!rx) return [];
+  const ql = `[out:json][timeout:25];area["ISO3166-1"="NL"][admin_level=2]->.nl;
+(nwr["sport"~"soccer"]["club"]["name"~"${rx}",i](area.nl);
+ nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i](area.nl););
+out center tags 60;`;
+  const r = await fetch(OVERPASS, { method: "POST", body: "data=" + encodeURIComponent(ql), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  if (!r.ok) throw new Error("De clublijst is nu niet bereikbaar. Probeer het zo nog eens.");
+  const j = await r.json(); const out = [];
+  (j.elements || []).forEach(e => {
+    const t = e.tags || {}; const lat = e.lat ?? (e.center && e.center.lat), lon = e.lon ?? (e.center && e.center.lon);
+    if (!t.name || lat == null) return;
+    const item = { name: t.name, lat, lon, club: !!t.club, city: t["addr:city"] || t["addr:place"] || "", street: t["addr:street"] ? t["addr:street"] + (t["addr:housenumber"] ? " " + t["addr:housenumber"] : "") : "" };
+    const dup = out.find(o => o.name.toLowerCase() === item.name.toLowerCase() && distKm(o, item) < 2);
+    if (dup) { if (item.club && !dup.club) Object.assign(dup, item); return; }
+    out.push(item);
+  });
+  return out.sort((a, b) => (b.club - a.club) || a.name.localeCompare(b.name)).slice(0, 25);
+}
+function distKm(a, b) { const R = 6371, r = Math.PI / 180; const dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); }
+async function addressFor(c) {
+  if (c.street && c.city) return c.street + ", " + c.city;
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=17&addressdetails=1&accept-language=nl&lat=${c.lat}&lon=${c.lon}`);
+    const j = await r.json(); const a = j.address || {};
+    const place = a.village || a.town || a.city || a.municipality || c.city || "";
+    return [a.road ? a.road + (a.house_number ? " " + a.house_number : "") : "", place].filter(Boolean).join(", ") || c.name;
+  } catch (e) { return c.city ? c.name + ", " + c.city : c.name; }
+}
+function clubSearchBlock(p) {
+  return `<div class="f"><span>Zoek je club in de lijst van voetbalclubs</span>
+    <div class="row" style="flex-wrap:nowrap"><input id="${p}-cs" placeholder="bv. Balk" aria-label="Clubnaam zoeken" data-cs="${p}"><button class="btn" type="button" data-act="clubsearch" data-p="${p}">Zoek</button></div>
+    <div id="${p}-csr" class="stack"></div></div>`;
+}
+function renderClubResults(p) {
+  const el = document.getElementById(p + "-csr"); if (!el) return;
+  const st = ui.clubSearch || {};
+  if (st.loading) { el.innerHTML = `<p class="small muted">Zoeken…</p>`; return; }
+  if (st.error) { el.innerHTML = `<div class="notice">${esc(st.error)}</div>`; return; }
+  if (!st.results) { el.innerHTML = ""; return; }
+  if (!st.results.length) { el.innerHTML = `<p class="small muted">Geen club gevonden. Probeer een ander deel van de naam, of vul je club en adres hieronder zelf in.</p>`; return; }
+  el.innerHTML = `<div class="names">${st.results.map((c, i) => `<button class="btn" type="button" data-act="clubpick" data-p="${p}" data-i="${i}">${esc(c.name)}${c.city ? ` <span class="muted small">${esc(c.city)}</span>` : ""}</button>`).join("")}</div>
+    <p class="small muted">Clubs uit OpenStreetMap (© OpenStreetMap-bijdragers). Staat je club er niet bij? Vul hem hieronder zelf in.</p>`;
+}
+async function doClubSearch(p) {
+  const q = (document.getElementById(p + "-cs") || {}).value || "";
+  ui.clubSearch = { loading: true }; renderClubResults(p);
+  try { ui.clubSearch = { results: await searchClubs(q) }; } catch (e) { ui.clubSearch = { error: e.message }; }
+  renderClubResults(p);
+}
+async function pickClub(p, i) {
+  const c = ui.clubSearch.results[i]; const clubIn = document.getElementById(p + "-club"), addrIn = document.getElementById(p + "-addr");
+  if (clubIn) clubIn.value = c.name;
+  if (addrIn) addrIn.value = "Adres opzoeken…";
+  const address = await addressFor(c);
+  if (addrIn) addrIn.value = address;
+  ui.clubPick = { name: c.name, lat: c.lat, lon: c.lon, address };
+  document.getElementById(p + "-csr").innerHTML = `<p class="small" style="color:var(--ok)">✓ ${esc(c.name)} gekozen. Controleer het adres hieronder.</p>`;
+}
+async function findOpponentClub(opponent, home) {
+  const name = clubFromTeam(opponent); if (!name) return null;
+  try { const list = await searchClubs(name); if (!list.length) return null;
+    if (home) list.sort((a, b) => distKm(home, a) - distKm(home, b));
+    return list[0]; } catch (e) { return null; }
 }
 async function calcMissingTravel() {
   const list = sorted().filter(m => !m.home && m.date >= todayStr() && !+m.travel);
@@ -323,8 +404,13 @@ function vLogin() {
 function vNewTeam() {
   const local = readLocal(LS_KEY); const hasLocal = local && (local.players.length || local.matches.length);
   return `<form class="card" id="newteamform" style="max-width:520px;justify-self:center;width:100%"><h2>${teams.length ? "Nieuw team" : "Welkom, coach"}</h2>
-    <p class="muted">Vul de naam van je club en team in. Je kunt later meer teams toevoegen.</p>
-    <label class="f">Club en team<input id="nt-name" name="name" required placeholder="bv. VV Balk JO15-2"></label>
+    <p class="muted">Kies je club en vul je team in. Je kunt later meer teams toevoegen.</p>
+    ${clubSearchBlock("nt")}
+    <div class="grid2">
+      <label class="f">Club<input id="nt-club" name="club" required placeholder="bv. VV Balk"></label>
+      <label class="f">Team<input id="nt-team" name="team" required placeholder="bv. JO15-2"></label>
+    </div>
+    <label class="f">Adres eigen sportcomplex<input id="nt-addr" name="address" placeholder="bv. Sportpark De Wissel, Balk"></label>
     ${hasLocal ? `<div class="checks"><label><input type="checkbox" name="fromLocal" checked> Neem de gegevens over die al in deze browser staan (${local.players.length} spelers, ${local.matches.length} wedstrijden)</label></div>` : ""}
     <div class="row"><button class="btn primary" type="submit">Team aanmaken</button>${teams.length ? '<button class="btn ghost" type="button" data-act="cancelnewteam">Annuleren</button>' : ""}</div>
   </form>`;
@@ -514,6 +600,7 @@ function vSettings() {
   const s = S.settings;
   return `<h2>Instellingen</h2>
   <form class="card" id="settingsform"><h3>Club en team</h3>
+    ${clubSearchBlock("sf")}
     <div class="grid2">
       <label class="f">Club<input id="sf-club" name="club" value="${esc(s.club)}" placeholder="bv. VV De Meeuwen"></label>
       <label class="f">Team<input id="sf-team" name="team" value="${esc(s.team)}" placeholder="bv. JO11-2"></label>
@@ -674,6 +761,8 @@ document.addEventListener("click", e => {
       }).catch(e => { info.textContent = e.message || "Berekenen lukte niet."; }).finally(() => { btn.disabled = false; });
       break; }
     case "calcall": calcMissingTravel(); break;
+    case "clubsearch": doClubSearch(t.dataset.p); break;
+    case "clubpick": pickClub(t.dataset.p, +t.dataset.i); break;
     case "copybackup": copy(document.getElementById("backup").value); break;
     case "restore": try { S = normalize(JSON.parse(document.getElementById("backup").value)); save(); render(); toast("Back-up teruggezet."); } catch (x) { toast("Die tekst is geen geldige back-up."); } break;
     case "reset": if (armed("reset")) { S = DEFAULTS(); save(); ui.tab = "planning"; render(); toast("Alles gewist."); } break;
@@ -708,10 +797,13 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; render(); return; }
   if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.lineup.cells[t.dataset.p][+t.dataset.b] = t.value; save(); render(); }
 });
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.dataset && e.target.dataset.cs) { e.preventDefault(); doClubSearch(e.target.dataset.cs); }
+});
 document.addEventListener("submit", e => {
   e.preventDefault(); const f = e.target; const fd = new FormData(f);
   if (f.id === "loginform") { login(fd); return; }
-  if (f.id === "newteamform") { createTeam((fd.get("name") || "").trim(), fd.has("fromLocal")); return; }
+  if (f.id === "newteamform") { createTeam(fd); return; }
   if (f.id === "matchform") {
     const id = f.dataset.id; const m = id ? S.matches.find(x => x.id === id) : { id: uid() };
     m.date = fd.get("date"); m.time = fd.get("time"); m.home = fd.get("home") === "1"; m.opponent = (fd.get("opponent") || "").trim();
@@ -733,10 +825,12 @@ document.addEventListener("submit", e => {
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
     s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch");
+    const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
+    ui.clubPick = null; ui.clubSearch = null;
     save(); render(); toast("Instellingen opgeslagen.");
   }
 });
 
-window.__tp = { get S() { return S; }, parseProgram, planDuties, planLineup, seasonStats, times };
+window.__tp = { get S() { return S; }, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
 render(); init();
 })();
