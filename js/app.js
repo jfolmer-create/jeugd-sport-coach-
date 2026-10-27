@@ -798,9 +798,15 @@ function vPlayers() {
   const list = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
   return `<div class="row between"><h2>Spelers <span class="muted" style="font-size:18px">${S.players.length}</span></h2><button class="btn primary" data-act="newplayer">Speler toevoegen</button></div>
     ${editing ? playerForm(editing) : ""}
+    <details class="card" id="bulkbox" ${S.players.length ? "" : "open"}><summary>Meerdere spelers tegelijk toevoegen</summary>
+      <p class="small muted">Zet één naam per regel. Wil je de ouders er meteen bij, zet die dan achter een streepje, bv. <em>Daan de Vries - Sanne &amp; Mark</em>. Kopiëren uit een WhatsApp-lijst of Excel mag ook. Daarna tik je hieronder per speler de posities aan.</p>
+      <textarea id="bulk-text" aria-label="Namen van spelers" placeholder="Daan de Vries - Sanne & Mark\nLotte Bakker\nSem Jansen"></textarea>
+      <div class="row"><button class="btn primary" type="button" data-act="bulkadd">Spelers toevoegen</button></div>
+    </details>
+    ${list.length ? `<p class="small muted">Tik op een positie om die aan of uit te zetten. Voor ouders, taken en leiders gebruik je Wijzig.</p>` : ""}
     ${list.length ? list.map(p => `<div class="card"><div class="player-line">
       <div><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span>
-      <div class="names" style="margin-top:4px">${(p.positions || []).map(k => `<span class="pill">${POS[k]}</span>`).join("") || '<span class="muted small">geen posities</span>'}</div></div>
+      <div class="names" style="margin-top:4px">${Object.entries(POS).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${on ? "✓ " : ""}${l}</button>`; }).join("")}</div></div>
       <div class="names">${p.leader ? `<span class="pill home">Leider${p.leaderDrives ? " · rijdt altijd" : ""}</span>` : ""}${["canDrive", "canFlag", "canWash"].map((k, i) => `<span class="pill ${p[k] ? "ok" : "warn"}">${p[k] ? "✓" : "✗"} ${["Rijden", "Grens", "Wassen"][i]}</span>`).join("")}
       <button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div></div>`).join("")
       : `<p class="muted">Nog geen spelers.</p>`}`;
@@ -1016,6 +1022,17 @@ document.addEventListener("click", e => {
     case "tolineup": ui.tab = "lineup"; ui.lineupMatch = id; render(); window.scrollTo(0, 0); break;
     case "cancel": ui.editMatch = ui.editPlayer = null; ui.arm = null; render(); break;
     case "delmatch": if (armed("delm" + id)) { S.matches = S.matches.filter(x => x.id !== id); ui.editMatch = null; save(); render(); } break;
+    case "togpos": { const p = pById(id); if (!p) break; p.positions = p.positions || [];
+      const k = t.dataset.pos; p.positions = p.positions.includes(k) ? p.positions.filter(x => x !== k) : p.positions.concat(k);
+      save(); render(); break; }
+    case "bulkadd": { const el = document.getElementById("bulk-text"); const have = new Set(S.players.map(p => p.name.toLowerCase())); let n = 0, dup = 0;
+      (el.value || "").split(/\r?\n/).forEach(line => {
+        line = line.replace(/^\s*(\d+[.)]?|[-*•])\s+/, "").trim(); if (!line) return;
+        const parts = line.split(/\t|;|\s+[-–]\s+/); const name = (parts[0] || "").trim(); if (!name) return;
+        if (have.has(name.toLowerCase())) { dup++; return; } have.add(name.toLowerCase());
+        S.players.push({ id: uid(), name, parent: (parts[1] || "").trim(), positions: [], canDrive: true, canFlag: true, canWash: true, leader: false, leaderDrives: false, leaderNoOther: false, seats: +S.settings.seatsDefault }); n++;
+      });
+      save(); render(); toast(n ? n + (n == 1 ? " speler" : " spelers") + " toegevoegd." + (dup ? " " + dup + (dup == 1 ? " stond er al in." : " stonden er al in.") : "") : (dup ? "Deze spelers staan er al in." : "Geen namen gevonden.")); break; }
     case "newplayer": ui.editPlayer = "new"; render(); window.scrollTo(0, 0); break;
     case "editplayer": ui.editPlayer = id; render(); window.scrollTo(0, 0); break;
     case "delplayer": if (armed("delp" + id)) { S.players = S.players.filter(x => x.id !== id); ui.editPlayer = null; save(); render(); } break;

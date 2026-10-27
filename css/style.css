@@ -116,3 +116,6 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .photo-prev { aspect-ratio: 16 / 9; }
 .photo-prev img { width: 100%; height: 100%; object-fit: cover; }
 label.btn { text-align: center; }
+button.pill.postog { border: 1px solid var(--line); cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; min-height: 32px; padding: 4px 10px; }
+button.pill.postog:not(.home) { background: none; color: var(--muted); }
+button.pill.postog.home { border-color: transparent; }
