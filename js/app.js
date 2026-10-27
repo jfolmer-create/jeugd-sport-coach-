@@ -343,8 +343,14 @@ function planLineup(m) {
     return null;
   };
   // Keeper wisselt alleen in de rust. Per wedstrijd kies je of de reservekeeper de tweede helft keept.
-  keepers[0] = keepers[1] = pickKeeper([]);
-  if (useReserve(m)) {
+  // Wie niet getraind heeft, begint op de bank; geldt ook voor de keeper als er een (reserve)keeper is die wel trainde.
+  const missed = id => (m.missedTraining || []).includes(id);
+  const best = pickKeeper([]);
+  const trained = pres.filter(p => (has(p, "K") || has(p, "R")) && !missed(p.id))
+    .sort((a, b) => (has(b, "K") - has(a, "K")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
+  keepers[0] = keepers[1] = best;
+  if (best && missed(best) && trained) { keepers[0] = trained.id; keepers[1] = best; }
+  else if (useReserve(m)) {
     const others = pres.filter(p => p.id !== keepers[0]);
     const r = others.filter(p => has(p, "R")).concat(others.filter(p => has(p, "K")))
       .sort((a, b) => (has(b, "R") - has(a, "R")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
@@ -355,7 +361,7 @@ function planLineup(m) {
     if (k) cells[k][b] = "K";
     const satLast = id => b > 0 && cells[id][b - 1] === "-";
     const cands = pres.filter(p => p.id !== k).sort((x, y) =>
-      (planned(x.id) - planned(y.id)) || (satLast(y.id) - satLast(x.id)) || order(x, y));
+      (b === 0 ? missed(x.id) - missed(y.id) : 0) || (planned(x.id) - planned(y.id)) || (satLast(y.id) - satLast(x.id)) || order(x, y));
     const chosen = cands.slice(0, onField - (k ? 1 : 0));
     const free = slots.slice(); const left = [];
     const flex = p => (p.positions || []).filter(x => x !== "K" && x !== "R");
@@ -573,14 +579,22 @@ function vLineup() {
     const rows = pres.filter(p => m.lineup.cells[p.id]).sort((a, b) => a.name.localeCompare(b.name));
     const missing = pres.filter(p => !m.lineup.cells[p.id]);
     table = `<div class="tablewrap"><table><thead><tr><th>Speler</th>${Array.from({ length: B }, (_, b) => `<th class="c">${Math.round(b * bm)}′–${Math.round((b + 1) * bm)}′</th>`).join("")}<th class="c">Deze wedstrijd</th><th class="c">Seizoen vooraf</th></tr></thead><tbody>
-      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong></td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + c}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}">${["K", "V", "M", "A", "-"].map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
+      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + c}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}">${["K", "V", "M", "A", "-"].map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
       <td class="c">${Math.round(lineupMinutes(m, p.id))}′</td><td class="c">${Math.round(season[p.id] ? season[p.id].min : 0)}′</td></tr>`).join("")}
       <tr><td class="muted small">Op het veld</td>${counts.map(n => `<td class="c ${n !== +S.settings.onField ? "" : "muted"}" style="${n !== +S.settings.onField && pres.length >= +S.settings.onField ? "color:var(--bad);font-weight:700" : ""}">${n}</td>`).join("")}<td></td><td></td></tr>
       </tbody></table></div>
       ${missing.length ? `<div class="notice">Nog niet ingedeeld: ${missing.map(p => esc(p.name)).join(", ")}. Maak het schema opnieuw.</div>` : ""}
       <p class="small muted">K = keeper, V = verdediger, M = middenveld, A = aanval. Pas een vakje aan als je iets anders wilt; de minuten rekenen mee.</p>`;
   }
+  const att = `<details class="card" ${ui.attOpen ? "open" : ""} id="attbox"><summary>Wie is er? ${S.players.length - pres.length ? `<span class="pill warn">${S.players.length - pres.length} afwezig</span>` : ""} ${(m.missedTraining || []).length ? `<span class="pill">${m.missedTraining.length} niet getraind</span>` : ""}</summary>
+    <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Speler</th><th class="c">Aanwezig</th><th class="c">Niet getraind</th></tr></thead><tbody>
+    ${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => { const ab = (m.absent || []).includes(p.id), mt = (m.missedTraining || []).includes(p.id);
+      return `<tr><td>${esc(p.name)}</td><td class="c"><input type="checkbox" id="att-${p.id}" data-act="att" data-p="${p.id}" ${ab ? "" : "checked"} ${m.played ? "disabled" : ""} aria-label="${esc(p.name)} aanwezig"></td>
+      <td class="c"><input type="checkbox" id="mt-${p.id}" data-act="mt" data-p="${p.id}" ${mt ? "checked" : ""} ${ab || m.played ? "disabled" : ""} aria-label="${esc(p.name)} niet getraind"></td></tr>`; }).join("")}
+    </tbody></table></div>
+    <p class="small muted">Wie niet getraind heeft, begint op de bank, tenzij er anders te weinig spelers zijn. Daarna telt alleen het eerlijk verdelen van de speelminuten.</p></details>`;
   return `<h2>Wisselschema</h2>
+    ${att}
     <div class="card"><div class="grid2">
       <label class="f">Wedstrijd<select id="lu-match" data-act="pickmatch">${list.map(x => `<option value="${x.id}" ${x.id === m.id ? "selected" : ""}>${esc(fmtDate(x.date))} · ${x.home ? "thuis" : "uit"} · ${esc(x.opponent)}${x.played ? " ✓" : ""}</option>`).join("")}</select></label>
       <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${B} blokken van ${Math.round(bm)} min</span></strong></div>
@@ -811,6 +825,17 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "imphome") { const r = ui.importRows[+t.dataset.i]; r.home = t.value === "1"; r.unsure = false; return; }
   if (t.dataset.act === "pickteam") { loadTeam(t.value); return; }
   if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; render(); return; }
+  if (t.dataset.act === "att" || t.dataset.act === "mt") {
+    const m = S.matches.find(x => x.id === ui.lineupMatch); const pid = t.dataset.p; ui.attOpen = true;
+    const key = t.dataset.act === "att" ? "absent" : "missedTraining"; const on = t.dataset.act === "att" ? !t.checked : t.checked;
+    m[key] = (m[key] || []).filter(x => x !== pid); if (on) m[key].push(pid);
+    if (key === "absent") {
+      if (on) m.missedTraining = (m.missedTraining || []).filter(x => x !== pid);
+      if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(x => !m.absent.includes(x)));
+    }
+    if (m.lineup && !m.played) { planLineup(m); toast(key === "absent" && on ? "Wisselschema aangepast. Kijk ook even naar het taakschema." : "Wisselschema aangepast."); }
+    save(); render(); return;
+  }
   if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
     if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); } save(); render(); return; }
   if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.lineup.cells[t.dataset.p][+t.dataset.b] = t.value; save(); render(); }
