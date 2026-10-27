@@ -252,7 +252,7 @@ function times(m) {
   const ko = toMin(m.time), arrive = ko - (+S.settings.arriveBefore || 0);
   // vertrektijd altijd naar beneden afronden op 5 minuten (10:43 wordt 10:40)
   const depart = m.home ? null : Math.floor((arrive - (+m.travel || 0)) / 5) * 5;
-  return { ko: fmt(ko), arrive: fmt(arrive), depart: depart == null ? null : fmt(depart) };
+  return { ko: fmt(ko), arrive: fmt(arrive), depart: depart == null ? null : +m.travel ? fmt(depart) : "?" };
 }
 // ---------- reistijd (OpenStreetMap: Nominatim + OSRM) ----------
 const geoCache = {};
@@ -267,10 +267,8 @@ async function geocode(q) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Geeft { minutes, km, label, query } of gooit een Error met een Nederlandse melding.
 async function calcTravel(address, opponent) {
-  if (!S.settings.homeAddress) throw new Error("Vul eerst het adres van je eigen sportcomplex in bij Instellingen.");
-  const hc = S.settings.homeCoords;
-  const home = hc && hc.address === S.settings.homeAddress ? hc : await geocode(S.settings.homeAddress);
-  if (!home) throw new Error("Het adres van je eigen sportcomplex is niet gevonden. Pas het aan bij Instellingen (bv. straat en plaats).");
+  const home = await ensureHome();
+  if (!home) throw new Error("Je eigen sportcomplex is niet gevonden. Kies je club of vul het adres in bij Instellingen.");
   const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
   let dest = null, query = "";
   if (!address) { const c = await findOpponentClub(opponent, home); if (c) { dest = { lat: c.lat, lon: c.lon, label: c.name + (c.city ? ", " + c.city : "") }; query = c.name; } }
@@ -281,30 +279,57 @@ async function calcTravel(address, opponent) {
   if (!j || !j.routes || !j.routes.length) throw new Error("Er is geen route gevonden.");
   return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query };
 }
+// Eigen sportcomplex: opgeslagen coördinaten, anders het adres, anders de club opzoeken op naam.
+async function ensureHome() {
+  const st = S.settings, hc = st.homeCoords;
+  if (hc && (!st.homeAddress || hc.address === st.homeAddress)) return hc;
+  let home = null;
+  if (st.homeAddress) { try { home = await geocode(st.homeAddress); } catch (e) {} }
+  if (home) { st.homeCoords = { lat: home.lat, lon: home.lon, address: st.homeAddress, label: home.label }; save(); return st.homeCoords; }
+  if (!st.club) return null;
+  const c = bestByName(await searchClubs(st.club).catch(() => []), st.club); if (!c) return null;
+  const address = await addressFor(c);
+  st.homeAddress = st.homeAddress || address;
+  st.homeCoords = { lat: c.lat, lon: c.lon, address: st.homeAddress, label: c.name }; save();
+  return st.homeCoords;
+}
+const normName = x => String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|sportvereniging)\b/g, " ").replace(/[^\p{L}\p{N}]+/gu, "");
+function nameScore(c, q) { const a = normName(c.name), b = normName(q); if (!b) return 0; return a === b ? 3 : a.startsWith(b) || b.startsWith(a) ? 2 : a.includes(b) ? 1 : 0; }
+function bestByName(list, q, near) {
+  if (!list || !list.length) return null;
+  return list.slice().sort((a, b) => (nameScore(b, q) - nameScore(a, q)) || (b.club - a.club) || (near ? distKm(near, a) - distKm(near, b) : 0))[0];
+}
 // Voetbalclubs zoeken in OpenStreetMap (Overpass). Geeft [{name, lat, lon, city, street}].
-const OVERPASS = "https://overpass-api.de/api/interpreter";
+const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
 const qlSafe = x => x.replace(/[^\p{L}\p{N}'-]/gu, "");
 async function searchClubs(q) {
-  const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/\s+/).filter(w => w.length > 1);
+  const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1);
   if (!words.length) return [];
   const rx = words.map(qlSafe).filter(Boolean).join(".*"); if (!rx) return [];
   const ql = `[out:json][timeout:25];area["ISO3166-1"="NL"][admin_level=2]->.nl;
 (nwr["sport"~"soccer"]["club"]["name"~"${rx}",i](area.nl);
- nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i](area.nl););
-out center tags 60;`;
-  const r = await fetch(OVERPASS, { method: "POST", body: "data=" + encodeURIComponent(ql), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-  if (!r.ok) throw new Error("De clublijst is nu niet bereikbaar. Probeer het zo nog eens.");
-  const j = await r.json(); const out = [];
+ nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i](area.nl);
+ nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium"]["operator"~"${rx}",i](area.nl););
+out center tags 80;`;
+  let j = null;
+  for (const ep of OVERPASS) {
+    try { const r = await fetch(ep, { method: "POST", body: "data=" + encodeURIComponent(ql), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+      if (r.ok) { j = await r.json(); break; } } catch (e) {}
+  }
+  if (!j) throw new Error("De clublijst is nu niet bereikbaar. Probeer het zo nog eens.");
+  const out = [];
   (j.elements || []).forEach(e => {
     const t = e.tags || {}; const lat = e.lat ?? (e.center && e.center.lat), lon = e.lon ?? (e.center && e.center.lon);
     if (!t.name || lat == null) return;
-    const item = { name: t.name, lat, lon, club: !!t.club, city: t["addr:city"] || t["addr:place"] || "", street: t["addr:street"] ? t["addr:street"] + (t["addr:housenumber"] ? " " + t["addr:housenumber"] : "") : "" };
+    const nm = rxTest(rx, t.name) ? t.name : (t.operator || t.name);
+    const item = { name: nm, lat, lon, club: !!t.club || nm !== t.name, city: t["addr:city"] || t["addr:place"] || "", street: t["addr:street"] ? t["addr:street"] + (t["addr:housenumber"] ? " " + t["addr:housenumber"] : "") : "" };
     const dup = out.find(o => o.name.toLowerCase() === item.name.toLowerCase() && distKm(o, item) < 2);
     if (dup) { if (item.club && !dup.club) Object.assign(dup, item); return; }
     out.push(item);
   });
   return out.sort((a, b) => (b.club - a.club) || a.name.localeCompare(b.name)).slice(0, 25);
 }
+function rxTest(rx, x) { try { return new RegExp(rx, "i").test(x); } catch (e) { return true; } }
 function distKm(a, b) { const R = 6371, r = Math.PI / 180; const dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); }
 async function addressFor(c) {
@@ -348,21 +373,36 @@ async function pickClub(p, i) {
 }
 async function findOpponentClub(opponent, home) {
   const name = clubFromTeam(opponent); if (!name) return null;
-  try { const list = await searchClubs(name); if (!list.length) return null;
-    if (home) list.sort((a, b) => distKm(home, a) - distKm(home, b));
-    return list[0]; } catch (e) { return null; }
+  const words = name.split(/\s+/).filter(w => normName(w).length > 2).sort((a, b) => b.length - a.length);
+  for (const q of [name, words[0]].filter((x, i, a) => x && a.indexOf(x) === i)) {
+    try {
+      let list = await searchClubs(q);
+      if (home) list = list.filter(c => distKm(home, c) < 250);
+      const c = bestByName(list, name, home); if (c && nameScore(c, name) > 0) return c;
+      if (c && q === words[0]) return c;
+    } catch (e) {}
+  }
+  return null;
 }
-async function calcMissingTravel() {
-  const list = sorted().filter(m => !m.home && m.date >= todayStr() && !+m.travel);
-  if (!list.length) { toast("Alle uitwedstrijden hebben al een reistijd."); return; }
+let travelBusy = false; const travelTried = new Set();
+function autoTravel() {
+  if (!canEdit() || travelBusy) return;
+  const list = sorted().filter(m => !m.home && m.date >= todayStr() && !+m.travel && !travelTried.has(m.id));
+  if (list.length) calcMissingTravel(true);
+}
+async function calcMissingTravel(quiet) {
+  if (travelBusy) return; travelBusy = true;
+  const list = sorted().filter(m => !m.home && m.date >= todayStr() && !+m.travel && (!quiet || !travelTried.has(m.id)));
+  if (!list.length) { travelBusy = false; if (!quiet) toast("Alle uitwedstrijden hebben al een reistijd."); return; }
   let ok = 0, fail = [];
   for (const m of list) {
-    toast("Reistijd berekenen: " + (m.opponent || "") + "…");
+    travelTried.add(m.id);
+    setSync("Reistijd berekenen: " + (m.opponent || "") + "…"); if (!quiet) toast("Reistijd berekenen: " + (m.opponent || "") + "…");
     try { const r = await calcTravel(m.address, m.opponent); m.travel = r.minutes; m.km = r.km; m.travelPlace = r.label; if (!m.address) m.address = r.label.split(",").slice(0, 3).join(","); ok++; }
     catch (e) { fail.push(m.opponent); if (/eigen sportcomplex/.test(e.message)) { toast(e.message); break; } }
   }
-  save(); render();
-  toast(ok + " reistijd(en) berekend." + (fail.length ? " Niet gevonden: " + fail.join(", ") + ". Vul daar het adres in." : ""));
+  travelBusy = false; save(); render();
+  toast(ok + " reistijd(en) berekend." + (fail.length ? " Niet gevonden: " + fail.join(", ") + ". Vul daar het adres in via Wijzig." : ""));
 }
 function toast(t) { const el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
 async function copy(text) {
@@ -520,7 +560,7 @@ function matchText(m) {
   L.push("");
   L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + (m.home ? " (thuis)" : " (uit)"));
   if (!m.home) {
-    L.push("🚗 Vertrek vanaf ons sportcomplex: *" + t.depart + "*");
+    L.push("🚗 Vertrek vanaf ons sportcomplex: " + (t.depart === "?" ? "volgt nog" : "*" + t.depart + "*"));
     if ((d.drive || []).length) L.push("   Rijders: " + d.drive.map(parentLabel).join(", "));
     if (m.address) L.push("📍 " + m.address);
   }
@@ -551,6 +591,10 @@ function render() {
   if (!inTeam) { main.innerHTML = ({ loading: vLoading, login: vLogin, newteam: vNewTeam, error: vError }[mode] || vLoading)(); return; }
   if (mode === "shared") ui.tab = "planning";
   main.innerHTML = ({ planning: vPlanning, matches: vMatches, players: vPlayers, lineup: vLineup, season: vSeason, settings: vSettings }[ui.tab] || vPlanning)();
+  setTimeout(autoTravel, 300);
+  if (canEdit() && ui.tab === "settings" && !S.settings.homeAddress && S.settings.club && !ui.homeTried) {
+    ui.homeTried = true; ensureHome().then(h => { if (h) { render(); toast("Adres van je sportcomplex gevonden. Controleer het even."); } });
+  }
   if (st.el) { const el = document.getElementById(st.el); if (el) el.focus(); }
 }
 function vLoading() { return `<div class="card empty"><p class="muted">Laden…</p></div>`; }
@@ -808,7 +852,8 @@ function vSettings() {
       <label class="f">Club<input id="sf-club" name="club" value="${esc(s.club)}" placeholder="bv. VV De Meeuwen"></label>
       <label class="f">Team<input id="sf-team" name="team" value="${esc(s.team)}" placeholder="bv. JO11-2"></label>
     </div>
-    <label class="f">Adres eigen sportcomplex (vertrekpunt bij uitwedstrijden, bv. Sportpark De Wissel, Balk)<input id="sf-addr" name="homeAddress" value="${esc(s.homeAddress)}"></label>
+    <label class="f">Adres eigen sportcomplex (vertrekpunt bij uitwedstrijden)<input id="sf-addr" name="homeAddress" value="${esc(s.homeAddress)}" placeholder="${s.club ? "Wordt automatisch opgezocht…" : "Vul eerst je club in"}"></label>
+    ${s.homeCoords && s.homeCoords.label ? `<p class="small muted">Gevonden: ${esc(s.homeCoords.label)}. Klopt het niet? Pas het adres aan en sla op, of zoek je club hierboven opnieuw.</p>` : ""}
     <label class="f" style="max-width:240px">Aanwezig voor de aftrap (min)<input id="sf-arr" name="arriveBefore" type="number" min="0" step="5" value="${esc(s.arriveBefore)}"></label>
     <h3>Wedstrijdvorm</h3>
     <div class="grid2">
@@ -1061,6 +1106,7 @@ document.addEventListener("submit", e => {
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
     s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.leaderDriveOne = fd.has("leaderDriveOne");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
+    else if (s.homeCoords && s.homeCoords.address !== s.homeAddress) { s.homeCoords = null; S.matches.forEach(m => { if (!m.home && m.date >= todayStr() && !m.locked) m.travel = 0; }); travelTried.clear(); }
     ui.clubPick = null; ui.clubSearch = null;
     save(); render(); toast("Instellingen opgeslagen.");
   }
