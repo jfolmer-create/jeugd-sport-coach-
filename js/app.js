@@ -521,10 +521,15 @@ function slotsFor() {
   return slots.slice(0, need);
 }
 function blockMin() { return (+S.settings.matchMinutes || 60) / Math.max(1, +S.settings.blocks || 1); }
+// Minuten per kolom van een wisselschema. Oude schema's hebben gelijke blokken; nieuwe kunnen een gehalveerd laatste blok hebben.
+function lineupDurs(m) {
+  const L = m.lineup; const n = (Object.values(L.cells || {})[0] || []).length;
+  if (Array.isArray(L.durs) && L.durs.length === n) return L.durs;
+  const bm = (+L.matchMinutes || +S.settings.matchMinutes || 60) / Math.max(1, n); return Array(n).fill(bm);
+}
 function lineupMinutes(m, pid) {
   if (!m.lineup || !m.lineup.cells || !m.lineup.cells[pid]) return 0;
-  const bm = (+m.lineup.matchMinutes || +S.settings.matchMinutes || 60) / Math.max(1, m.lineup.cells[pid].length);
-  return m.lineup.cells[pid].filter(c => c && c !== "-").length * bm;
+  const d = lineupDurs(m); return m.lineup.cells[pid].reduce((t, c, i) => t + (c && c !== "-" ? d[i] || 0 : 0), 0);
 }
 function seasonStats(beforeMatch) {
   const st = {}; S.players.forEach(p => st[p.id] = { min: 0, keeper: 0, games: 0, avail: 0 });
@@ -544,8 +549,14 @@ const useReserve = m => m.useReserve ?? (S.settings.keeperFull === false);
 function planLineup(m) {
   const pres = present(m); const B = Math.max(1, +S.settings.blocks || 4); const onField = Math.max(1, +S.settings.onField || 8);
   const bm = blockMin(); const season = seasonStats(m); const slots = slotsFor();
-  const cells = {}; pres.forEach(p => cells[p.id] = Array(B).fill("-"));
-  const planned = id => season[id].min + cells[id].filter(c => c !== "-").length * bm;
+  // Komt de bank niet eerlijk uit (sommigen zouden twee blokken zitten), dan halveren we het laatste blok:
+  // dan zitten er een paar spelers een half blok extra in plaats van twee spelers een heel blok.
+  const benchN = Math.max(0, pres.length - onField), fieldN = Math.max(1, pres.length - 1);
+  const split = S.settings.splitLast !== false && B >= 2 && benchN > 0 && (B * benchN) % fieldN !== 0;
+  const durs = split ? Array(B - 1).fill(bm).concat([bm / 2, bm / 2]) : Array(B).fill(bm);
+  const C = durs.length; const base = c => Math.min(c, B - 1);
+  const cells = {}; pres.forEach(p => cells[p.id] = Array(C).fill("-"));
+  const planned = id => season[id].min + cells[id].reduce((t, c, i) => t + (c !== "-" ? durs[i] : 0), 0);
   const half = Math.ceil(B / 2); const keepers = [];
   const order = (a, b) => planned(a.id) - planned(b.id) || season[a.id].min - season[b.id].min || a.name.localeCompare(b.name);
   // Keeper eerst, dan reservekeeper, dan wie het minst gespeeld heeft.
@@ -572,8 +583,8 @@ function planLineup(m) {
       .sort((a, b) => (has(b, "R") - has(a, "R")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
     if (r) keepers[1] = r.id;
   }
-  for (let b = 0; b < B; b++) {
-    const k = keepers[Math.min(1, Math.floor(b / half))];
+  for (let b = 0; b < C; b++) {
+    const k = keepers[Math.min(1, Math.floor(base(b) / half))];
     if (k) cells[k][b] = "K";
     const satLast = id => b > 0 && cells[id][b - 1] === "-";
     const cands = pres.filter(p => p.id !== k).sort((x, y) =>
@@ -597,7 +608,7 @@ function planLineup(m) {
     });
     left.forEach(p => { cells[p.id][b] = free.length ? free.shift() : "M"; });
   }
-  m.lineup = { cells, matchMinutes: +S.settings.matchMinutes || 60, created: Date.now() };
+  m.lineup = { cells, durs, matchMinutes: +S.settings.matchMinutes || 60, created: Date.now() };
 }
 
 // ---------- WhatsApp text ----------
@@ -843,14 +854,15 @@ function vLineup() {
   if (!list.length || !S.players.length) return `<h2>Wisselschema</h2><p class="muted">Voeg eerst spelers en wedstrijden toe.</p>`;
   if (!ui.lineupMatch || !list.find(m => m.id === ui.lineupMatch)) ui.lineupMatch = (list.find(m => m.date >= todayStr()) || list[list.length - 1]).id;
   const m = list.find(x => x.id === ui.lineupMatch); const pres = present(m);
-  const B = m.lineup ? (Object.values(m.lineup.cells)[0] || []).length : +S.settings.blocks; const bm = (m.lineup ? m.lineup.matchMinutes : +S.settings.matchMinutes) / Math.max(1, B);
+  const B = m.lineup ? (Object.values(m.lineup.cells)[0] || []).length : +S.settings.blocks; const bm = blockMin();
+  const durs = m.lineup ? lineupDurs(m) : Array(B).fill(bm); const startAt = durs.map((_, i) => durs.slice(0, i).reduce((a, x) => a + x, 0));
   const season = seasonStats(m);
   let table = "";
   if (m.lineup) {
     const counts = Array(B).fill(0); Object.values(m.lineup.cells).forEach(r => r.forEach((c, b) => { if (c !== "-") counts[b]++; }));
     const rows = pres.filter(p => m.lineup.cells[p.id]).sort((a, b) => a.name.localeCompare(b.name));
     const missing = pres.filter(p => !m.lineup.cells[p.id]);
-    table = `<div class="tablewrap"><table><thead><tr><th>Speler</th>${Array.from({ length: B }, (_, b) => `<th class="c">${Math.round(b * bm)}′–${Math.round((b + 1) * bm)}′</th>`).join("")}<th class="c">Deze wedstrijd</th><th class="c">Seizoen vooraf</th></tr></thead><tbody>
+    table = `<div class="tablewrap"><table><thead><tr><th>Speler</th>${durs.map((d, b) => `<th class="c">${Math.round(startAt[b])}′–${Math.round(startAt[b] + d)}′</th>`).join("")}<th class="c">Deze wedstrijd</th><th class="c">Seizoen vooraf</th></tr></thead><tbody>
       ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + c}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}">${["K", "V", "M", "A", "-"].map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
       <td class="c">${Math.round(lineupMinutes(m, p.id))}′</td><td class="c">${Math.round(season[p.id] ? season[p.id].min : 0)}′</td></tr>`).join("")}
       <tr><td class="muted small">Op het veld</td>${counts.map(n => `<td class="c ${n !== +S.settings.onField ? "" : "muted"}" style="${n !== +S.settings.onField && pres.length >= +S.settings.onField ? "color:var(--bad);font-weight:700" : ""}">${n}</td>`).join("")}<td></td><td></td></tr>
@@ -869,7 +881,7 @@ function vLineup() {
     ${att}
     <div class="card"><div class="grid2">
       <label class="f">Wedstrijd<select id="lu-match" data-act="pickmatch">${list.map(x => `<option value="${x.id}" ${x.id === m.id ? "selected" : ""}>${esc(fmtDate(x.date))} · ${x.home ? "thuis" : "uit"} · ${esc(x.opponent)}${x.played ? " ✓" : ""}</option>`).join("")}</select></label>
-      <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${B} blokken van ${Math.round(bm)} min</span></strong></div>
+      <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${S.settings.blocks} blokken van ${Math.round(bm)} min</span></strong></div>
     </div>
     <div class="checks"><label><input type="checkbox" id="lu-reserve" data-act="usereserve" ${useReserve(m) ? "checked" : ""} ${m.played ? "disabled" : ""}> Reservekeeper keept de tweede helft${S.players.some(p => (p.positions || []).includes("R")) ? "" : ' <span class="muted small">(geef bij Spelers eerst iemand de positie reservekeeper)</span>'}</label></div>
     <div class="row"><button class="btn primary" data-act="genlineup">${m.lineup ? "Opnieuw maken" : "Maak wisselschema"}</button>
@@ -935,6 +947,7 @@ function vSettings() {
     <label><input type="checkbox" name="leaderDriveOne" ${s.leaderDriveOne !== false ? "checked" : ""}> Bij meerdere leiders rijdt er per uitwedstrijd één (om de beurt)</label></div>
     <h3>Keeper</h3>
     <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Standaard staat de keeper de hele wedstrijd in het doel</label></div>
+    <div class="checks"><label><input type="checkbox" name="splitLast" ${s.splitLast !== false ? "checked" : ""}> Laatste blok halveren als de bank anders niet eerlijk uitkomt (dan zitten meer spelers een half blok extra, in plaats van een paar spelers een heel blok extra)</label></div>
     <p class="small muted">Per wedstrijd kies je bij Wissels of de reservekeeper de tweede helft keept. De keeper wisselt alleen in de rust. Is de keeper afwezig, dan keept de reservekeeper. Een keeper die de hele wedstrijd staat, maakt meer speelminuten. Het wisselschema verdeelt de rest eerlijk over de veldspelers.</p>
     <div class="row"><button class="btn primary" type="submit">Opslaan</button></div>
   </form>
@@ -1183,7 +1196,7 @@ document.addEventListener("submit", e => {
     const s = S.settings;
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
-    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.leaderDriveOne = fd.has("leaderDriveOne");
+    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.splitLast = fd.has("splitLast"); s.leaderDriveOne = fd.has("leaderDriveOne");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
     else if (s.homeCoords && s.homeCoords.address !== s.homeAddress) { s.homeCoords = null; S.matches.forEach(m => { if (!m.home && m.date >= todayStr() && !m.locked) m.travel = 0; }); travelTried.clear(); }
     ui.clubPick = null; ui.clubSearch = null;
