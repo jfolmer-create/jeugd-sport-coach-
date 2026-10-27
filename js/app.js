@@ -108,17 +108,18 @@ async function closeRound() {
   S.matches.filter(m => ids.includes(m.id)).forEach(m => {
     const abs = S.players.filter(p => cannotDo(m.id, p.id, "absent")).map(p => p.id);
     m.absent = [...new Set([...(m.absent || []), ...abs])];
-    m.locked = false;
+    if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid)));
   });
   planDuties();
   S.matches.filter(m => ids.includes(m.id)).forEach(m => m.locked = true);
-  save(); render(); toast("Ronde gesloten en taken ingedeeld. Deze wedstrijden staan nu vast.");
+  const gaps = S.matches.filter(m => ids.includes(m.id) && dutyIssues(m).length).length;
+  save(); render(); toast("Ronde gesloten en taken ingedeeld." + (gaps ? " Let op: bij " + gaps + " wedstrijd(en) ontbreekt nog iemand, zie de meldingen." : ""));
 }
 function roundText() {
   const ms = sorted().filter(m => round.matches.includes(m.id));
   return "Hoi allemaal! Het programma voor de komende periode is bekend (" + ms.length + " wedstrijden" + (ms.length ? ", " + fmtDate(ms[0].date) + " t/m " + fmtDate(ms[ms.length - 1].date) : "") + ").\n" +
-    "Geef via deze link door wanneer je niet kunt rijden, vlaggen of wassen, of wanneer je kind er niet is:\n" + shareUrl() + "\n" +
-    "Daarna maak ik het schema. Kun je dan toch niet, ruil dan zelf met een andere ouder.";
+    "Geef via deze link door wanneer je kind er niet is:\n" + shareUrl() + "\n" +
+    "Daarna maak ik het taakschema. Kun je dan niet op je beurt, ruil dan zelf met een andere ouder.";
 }
 function roundCard() {
   if (mode !== "cloud") return "";
@@ -131,14 +132,9 @@ function roundCard() {
       <div class="row"><button class="btn" data-act="roundcopy">Kopieer bericht voor ouders</button><button class="btn ghost" data-act="roundrefresh">Vernieuwen</button>
       <button class="btn ${ui.arm === "roundclose" ? "arm" : "primary"}" data-act="roundclose">${ui.arm === "roundclose" ? "Zeker? Ouders kunnen daarna niets meer doorgeven" : "Sluiten en taken indelen"}</button></div></div>`;
   }
-  if (ui.roundSetup) {
-    return `<div class="card"><h3>Nieuwe ronde: voor welke wedstrijden?</h3>
-      <div class="checks" style="flex-direction:column">${up.map(m => `<label><input type="checkbox" name="roundm" value="${m.id}" ${m.locked ? "" : "checked"}> ${esc(fmtDate(m.date))} · ${m.home ? "thuis" : "uit"} · ${esc(m.opponent)}${m.locked ? ' <span class="pill lock">vastgezet</span>' : ""}</label>`).join("")}</div>
-      <div class="row"><button class="btn primary" data-act="roundopen">Ronde openen</button><button class="btn ghost" data-act="roundcancel">Annuleren</button></div></div>`;
-  }
   return `<div class="card"><h3>Beschikbaarheid ouders</h3>
-    <p class="small muted">Nieuw blok wedstrijden bekend? Open een ronde en stuur de link naar de ouders. Zij geven door wanneer ze niet kunnen. Daarna sluit je de ronde en deelt de planner de taken in. Vanaf dan ruilen ouders onderling.</p>
-    <div class="row"><button class="btn" data-act="roundsetup" ${up.length ? "" : "disabled"}>Nieuwe ronde starten</button></div></div>`;
+    <p class="small muted">Nieuw blok wedstrijden bekend? Open een ronde voor alle komende wedstrijden (${up.length}) en stuur de link naar de ouders. Zij geven door wanneer hun kind er niet is. Daarna sluit je de ronde en deelt de planner de taken in. Wedstrijden die al vaststonden, houden hun indeling. Vanaf dan ruilen ouders onderling.</p>
+    <div class="row"><button class="btn" data-act="roundopen" ${up.length ? "" : "disabled"}>Ronde openen</button></div></div>`;
 }
 function parentCard() {
   if (mode !== "shared") return "";
@@ -148,11 +144,10 @@ function parentCard() {
   let pid = ui.avChild; if (!pid) { try { pid = localStorage.getItem("teamplanner.child." + shareToken); } catch (e) {} }
   const p = pById(pid);
   const box = (m, what, label) => `<label><input type="checkbox" name="${m.id}" value="${what}" ${p && cannotDo(m.id, p.id, what) ? "checked" : ""}> ${label}</label>`;
-  return `<form class="card" id="availform"><h3>Geef door wanneer je niet kunt</h3>
-    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink aan wat bij jullie niet lukt. Je kunt het aanpassen tot de coach het schema maakt.</p>
+  return `<form class="card" id="availform"><h3>Geef door wanneer je kind er niet is</h3>
+    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink de wedstrijden aan waarbij je kind er niet is. Je kunt het aanpassen tot de coach het schema maakt.</p>
     <label class="f">Mijn kind<select id="av-child" data-act="avchild"><option value="">Kies…</option>${list.map(x => `<option value="${x.id}" ${p && p.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
-    ${p ? `<div class="stack">${ms.map(m => `<div class="card" style="padding:10px"><strong>${esc(fmtDate(m.date))} · ${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)}</strong>
-      <div class="checks">${box(m, "absent", esc(p.name) + " is er niet")}${!m.home && p.canDrive ? box(m, "drive", "Kan niet rijden") : ""}${(m.home || S.settings.flagAway) && p.canFlag ? box(m, "flag", "Kan geen grensrechter zijn") : ""}${S.settings.washPerMatch && p.canWash ? box(m, "wash", "Kan niet wassen") : ""}</div></div>`).join("")}</div>
+    ${p ? `<div class="checks" style="flex-direction:column">${ms.map(m => box(m, "absent", `${esc(p.name)} is er niet op <strong>${esc(fmtDate(m.date))}</strong> (${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)})`)).join("")}</div>
       <div class="row"><button class="btn primary" type="submit">Doorgeven</button></div>` : ""}
   </form>`;
 }
@@ -883,11 +878,8 @@ document.addEventListener("click", e => {
       break; }
     case "calcall": calcMissingTravel(); break;
     case "editduties": ui.editDuties = ui.editDuties === id ? null : id; render(); break;
-    case "roundsetup": ui.roundSetup = true; render(); break;
-    case "roundcancel": ui.roundSetup = false; render(); break;
-    case "roundopen": { const ids = [...document.querySelectorAll('input[name="roundm"]:checked')].map(x => x.value);
-      if (!ids.length) { toast("Kies minstens één wedstrijd."); break; }
-      setRound(true, ids).then(ok => { if (ok) { ui.roundSetup = false; render(); toast("Ronde geopend. Kopieer het bericht en stuur het naar de ouders."); } }); break; }
+    case "roundopen": { const ids = sorted().filter(m => m.date >= todayStr()).map(m => m.id);
+      setRound(true, ids).then(ok => { if (ok) { render(); toast("Ronde geopend voor " + ids.length + " wedstrijden. Kopieer het bericht voor de ouders."); } }); break; }
     case "roundcopy": copy(roundText()); break;
     case "roundrefresh": loadAvail().then(() => { render(); toast("Bijgewerkt."); }); break;
     case "roundclose": if (armed("roundclose")) closeRound(); break;
