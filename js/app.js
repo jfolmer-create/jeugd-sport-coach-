@@ -266,11 +266,28 @@ async function geocode(q) {
   return geoCache[key] = { lat: +j[0].lat, lon: +j[0].lon, label: j[0].display_name };
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// OpenStreetMap vindt "Kruistraat 3-5, 8471 HH Wolvega (Sportpark Molenwiek)" niet in één keer.
+// Daarom proberen we het adres ook in eenvoudigere vormen: zonder haakjes, met één huisnummer, zonder postcode, alleen postcode.
+function addressVariants(a) {
+  if (!a) return [];
+  const clean = a.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").replace(/^[, ]+|[, ]+$/g, "");
+  const oneNr = clean.replace(/(\d+)\s*[a-zA-Z]?\s*[-–\/]\s*\d+\s*[a-zA-Z]?\b/, "$1");
+  const pcRe = /\b(\d{4})\s?([A-Za-z]{2})\b/; const pc = oneNr.match(pcRe);
+  const noPc = oneNr.replace(pcRe, "").replace(/\s+/g, " ").replace(/,\s*,/g, ",").replace(/^[, ]+|[, ]+$/g, "");
+  const parts = noPc.split(",").map(x => x.trim()).filter(Boolean);
+  const city = parts.length > 1 ? parts[parts.length - 1] : "";
+  const street = parts[0] || "";
+  const out = [a, clean, oneNr, noPc];
+  if (pc) out.push(pc[1] + " " + pc[2].toUpperCase() + (city ? ", " + city : ""));
+  if (street && city) out.push(street.replace(/\s*\d+.*$/, "") + ", " + city);
+  const inside = (a.match(/\(([^)]*)\)/) || [])[1]; if (inside && city) out.push(inside + ", " + city);
+  return [...new Set(out.map(x => x.trim()).filter(Boolean))];
+}
 // Geeft { minutes, km, label, query } of gooit een Error met een Nederlandse melding.
 async function calcTravel(address, opponent) {
   const home = await ensureHome();
   if (!home) throw new Error("Je eigen sportcomplex is niet gevonden. Kies je club of vul het adres in bij Instellingen.");
-  const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
+  const tries = [...addressVariants(address), clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
   let dest = null, query = "";
   let shared = null;
   if (!address) { shared = await sharedClub(opponent); if (shared) { dest = { lat: shared.lat, lon: shared.lon, label: shared.name + ", " + shared.address + " (gedeeld adresboek, " + shared.votes + (shared.votes == 1 ? " coach" : " coaches") + ")" }; query = shared.address; } }
