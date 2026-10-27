@@ -352,13 +352,18 @@ function planDuties(onlyFuture = true) {
     };
     if (!m.home) {
       let cap = 0; const need = pres.length; const taken = [];
+      // leiders die altijd rijden gaan eerst mee, buiten de eerlijke verdeling om
+      pres.filter(p => p.leader && p.leaderDrives && !cannotDo(m.id, p.id, "drive")).forEach(p => {
+        taken.push(p.id); used.add(p.id); duties.drive.push(p.id); cap += Math.max(1, +p.seats || +S.settings.seatsDefault || 3);
+      });
       while (cap < need) {
         const c = pick("drive", p => p.canDrive && !taken.includes(p.id));
         if (!c) break; taken.push(c.id); duties.drive.push(c.id); cap += Math.max(1, +c.seats || +S.settings.seatsDefault || 3);
       }
     }
-    if (m.home || S.settings.flagAway) { const c = pick("flag", p => p.canFlag); if (c) duties.flag.push(c.id); }
-    if (S.settings.washPerMatch) { const c = pick("wash", p => p.canWash); if (c) duties.wash.push(c.id); }
+    const free = p => !(p.leader && p.leaderNoOther);
+    if (m.home || S.settings.flagAway) { const c = pick("flag", p => p.canFlag && free(p)); if (c) duties.flag.push(c.id); }
+    if (S.settings.washPerMatch) { const c = pick("wash", p => p.canWash && free(p)); if (c) duties.wash.push(c.id); }
     m.duties = duties; tally(m, i);
   });
 }
@@ -658,6 +663,10 @@ function playerForm(p) {
       <label><input type="checkbox" name="canDrive" ${p.canDrive !== false ? "checked" : ""}> Rijden</label>
       <label><input type="checkbox" name="canFlag" ${p.canFlag !== false ? "checked" : ""}> Grensrechter</label>
       <label><input type="checkbox" name="canWash" ${p.canWash !== false ? "checked" : ""}> Wassen</label></div></div>
+    <div class="f"><span class="small muted">Leider of trainer</span><div class="checks" style="flex-direction:column">
+      <label><input type="checkbox" name="leader" ${p.leader ? "checked" : ""}> Een ouder is leider of trainer van het team</label>
+      <label><input type="checkbox" name="leaderDrives" ${p.leader === undefined || p.leaderDrives !== false ? "checked" : ""}> Rijdt altijd naar uitwedstrijden (telt niet mee in de verdeling)</label>
+      <label><input type="checkbox" name="leaderNoOther" ${p.leader === undefined || p.leaderNoOther !== false ? "checked" : ""}> Geen grensrechter of wassen</label></div></div>
     <label class="f" style="max-width:240px">Plekken voor kinderen in de auto (incl. eigen kind)<input id="pf-seats" name="seats" type="number" min="1" max="8" value="${esc(p.seats || S.settings.seatsDefault)}"></label>
     <div class="row"><button class="btn primary" type="submit">Opslaan</button><button class="btn ghost" type="button" data-act="cancel">Annuleren</button>
     ${isNew ? "" : `<button class="btn ${ui.arm === "delp" + p.id ? "arm" : "danger"}" type="button" data-act="delplayer" data-id="${p.id}">${ui.arm === "delp" + p.id ? "Zeker weten? Tik nogmaals" : "Verwijderen"}</button>`}</div>
@@ -671,7 +680,7 @@ function vPlayers() {
     ${list.length ? list.map(p => `<div class="card"><div class="player-line">
       <div><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span>
       <div class="names" style="margin-top:4px">${(p.positions || []).map(k => `<span class="pill">${POS[k]}</span>`).join("") || '<span class="muted small">geen posities</span>'}</div></div>
-      <div class="names">${["canDrive", "canFlag", "canWash"].map((k, i) => `<span class="pill ${p[k] ? "ok" : "warn"}">${p[k] ? "✓" : "✗"} ${["Rijden", "Grens", "Wassen"][i]}</span>`).join("")}
+      <div class="names">${p.leader ? `<span class="pill home">Leider${p.leaderDrives ? " · rijdt altijd" : ""}</span>` : ""}${["canDrive", "canFlag", "canWash"].map((k, i) => `<span class="pill ${p[k] ? "ok" : "warn"}">${p[k] ? "✓" : "✗"} ${["Rijden", "Grens", "Wassen"][i]}</span>`).join("")}
       <button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div></div>`).join("")
       : `<p class="muted">Nog geen spelers.</p>`}`;
 }
@@ -981,7 +990,8 @@ document.addEventListener("submit", e => {
   } else if (f.id === "playerform") {
     const id = f.dataset.id; const p = id ? pById(id) : { id: uid() };
     p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos");
-    p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash"); p.seats = +fd.get("seats") || +S.settings.seatsDefault;
+    p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash");
+    p.leader = fd.has("leader"); p.leaderDrives = fd.has("leaderDrives"); p.leaderNoOther = fd.has("leaderNoOther"); p.seats = +fd.get("seats") || +S.settings.seatsDefault;
     if (!id) S.players.push(p); ui.editPlayer = null; save(); render(); toast("Speler opgeslagen.");
   } else if (f.id === "settingsform") {
     const s = S.settings;
