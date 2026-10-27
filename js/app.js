@@ -414,6 +414,7 @@ async function calcMissingTravel(quiet) {
   for (const m of list) {
     travelTried.add(m.id);
     setSync("Reistijd berekenen: " + (m.opponent || "") + "…"); if (!quiet) toast("Reistijd berekenen: " + (m.opponent || "") + "…");
+    if (!m.address) { const k = S.matches.find(x => x !== m && !x.home && x.address && clubFromTeam(x.opponent).toLowerCase() === clubFromTeam(m.opponent).toLowerCase()); if (k) m.address = k.address; }
     try { const r = await calcTravel(m.address, m.opponent); m.travel = r.minutes; m.km = r.km; m.travelPlace = r.label; if (!m.address) m.address = r.label.split(",").slice(0, 3).join(","); ok++; }
     catch (e) { fail.push(m.opponent); if (/eigen sportcomplex/.test(e.message)) { toast(e.message); break; } }
   }
