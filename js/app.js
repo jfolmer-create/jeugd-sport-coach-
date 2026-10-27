@@ -324,6 +324,7 @@ function seasonStats(beforeMatch) {
   });
   return st;
 }
+const useReserve = m => m.useReserve ?? (S.settings.keeperFull === false);
 function planLineup(m) {
   const pres = present(m); const B = Math.max(1, +S.settings.blocks || 4); const onField = Math.max(1, +S.settings.onField || 8);
   const bm = blockMin(); const season = seasonStats(m); const slots = slotsFor();
@@ -341,12 +342,13 @@ function planLineup(m) {
     }
     return null;
   };
-  if (S.settings.keeperFull !== false) { keepers[0] = keepers[1] = pickKeeper([]); }
-  else {
-    // tweede helft: een andere keeper of de reservekeeper als die er is, anders dezelfde keeper
-    keepers[0] = pickKeeper([]);
-    const second = pickKeeper([keepers[0]]); const sp = pById(second) || {};
-    keepers[1] = second && (has(sp, "K") || has(sp, "R")) ? second : keepers[0];
+  // Keeper wisselt alleen in de rust. Per wedstrijd kies je of de reservekeeper de tweede helft keept.
+  keepers[0] = keepers[1] = pickKeeper([]);
+  if (useReserve(m)) {
+    const others = pres.filter(p => p.id !== keepers[0]);
+    const r = others.filter(p => has(p, "R")).concat(others.filter(p => has(p, "K")))
+      .sort((a, b) => (has(b, "R") - has(a, "R")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
+    if (r) keepers[1] = r.id;
   }
   for (let b = 0; b < B; b++) {
     const k = keepers[Math.min(1, Math.floor(b / half))];
@@ -583,6 +585,7 @@ function vLineup() {
       <label class="f">Wedstrijd<select id="lu-match" data-act="pickmatch">${list.map(x => `<option value="${x.id}" ${x.id === m.id ? "selected" : ""}>${esc(fmtDate(x.date))} · ${x.home ? "thuis" : "uit"} · ${esc(x.opponent)}${x.played ? " ✓" : ""}</option>`).join("")}</select></label>
       <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${B} blokken van ${Math.round(bm)} min</span></strong></div>
     </div>
+    <div class="checks"><label><input type="checkbox" id="lu-reserve" data-act="usereserve" ${useReserve(m) ? "checked" : ""} ${m.played ? "disabled" : ""}> Reservekeeper keept de tweede helft${S.players.some(p => (p.positions || []).includes("R")) ? "" : ' <span class="muted small">(geef bij Spelers eerst iemand de positie reservekeeper)</span>'}</label></div>
     <div class="row"><button class="btn primary" data-act="genlineup">${m.lineup ? "Opnieuw maken" : "Maak wisselschema"}</button>
     ${m.lineup ? `<button class="btn ${m.played ? "" : ""}" data-act="played">${m.played ? "✓ Gespeeld (telt mee)" : "Markeer als gespeeld"}</button><button class="btn ghost" data-act="copylineup">Kopieer opstelling</button>` : ""}</div>
     <p class="small muted">Kinderen met de minste speelminuten dit seizoen krijgen voorrang. Wie het vorige blok wisselde, gaat er het volgende blok weer in. Een gespeelde wedstrijd telt mee voor het seizoensoverzicht.</p></div>
@@ -631,8 +634,8 @@ function vSettings() {
     <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook grensrechter bij uitwedstrijden</label>
     <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label></div>
     <h3>Keeper</h3>
-    <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Keeper staat de hele wedstrijd in het doel</label></div>
-    <p class="small muted">Uitgevinkt: de tweede helft keept een andere keeper of de reservekeeper. Is de keeper afwezig, dan keept de reservekeeper. Een keeper die de hele wedstrijd staat, maakt meer speelminuten. Het wisselschema verdeelt de rest eerlijk over de veldspelers.</p>
+    <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Standaard staat de keeper de hele wedstrijd in het doel</label></div>
+    <p class="small muted">Per wedstrijd kies je bij Wissels of de reservekeeper de tweede helft keept. De keeper wisselt alleen in de rust. Is de keeper afwezig, dan keept de reservekeeper. Een keeper die de hele wedstrijd staat, maakt meer speelminuten. Het wisselschema verdeelt de rest eerlijk over de veldspelers.</p>
     <div class="row"><button class="btn primary" type="submit">Opslaan</button></div>
   </form>
   ${accountCard()}
@@ -808,6 +811,8 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "imphome") { const r = ui.importRows[+t.dataset.i]; r.home = t.value === "1"; r.unsure = false; return; }
   if (t.dataset.act === "pickteam") { loadTeam(t.value); return; }
   if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; render(); return; }
+  if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
+    if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); } save(); render(); return; }
   if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.lineup.cells[t.dataset.p][+t.dataset.b] = t.value; save(); render(); }
 });
 document.addEventListener("keydown", e => {
