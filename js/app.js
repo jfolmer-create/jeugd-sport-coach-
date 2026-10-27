@@ -271,24 +271,27 @@ async function calcTravel(address, opponent) {
   if (!home) throw new Error("Je eigen sportcomplex is niet gevonden. Kies je club of vul het adres in bij Instellingen.");
   const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
   let dest = null, query = "";
-  if (!address) { const sh = await sharedClub(opponent); if (sh) { dest = { lat: sh.lat, lon: sh.lon, label: sh.name + ", " + sh.address }; query = sh.address; } }
+  let shared = null;
+  if (!address) { shared = await sharedClub(opponent); if (shared) { dest = { lat: shared.lat, lon: shared.lon, label: shared.name + ", " + shared.address + " (gedeeld adresboek, " + shared.votes + (shared.votes == 1 ? " coach" : " coaches") + ")" }; query = shared.address; } }
   if (!address && !dest) { const c = await findOpponentClub(opponent, home); if (c) { dest = { lat: c.lat, lon: c.lon, label: c.name + (c.city ? ", " + c.city : "") }; query = c.name; } }
   if (!dest) for (const q of tries) { await sleep(1100); dest = await geocode(q); if (dest) { query = q; break; } }
   if (!dest) throw new Error("Het adres van de uitclub is niet gevonden. Vul het adres in (straat en plaats).");
   const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${home.lon},${home.lat};${dest.lon},${dest.lat}?overview=false`);
   const j = r.ok ? await r.json() : null;
   if (!j || !j.routes || !j.routes.length) throw new Error("Er is geen route gevonden.");
-  return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query, lat: dest.lat, lon: dest.lon };
+  if (shared) shareClub(opponent, shared.address, shared.lat, shared.lon); // gebruiken telt als bevestiging
+  return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query, lat: dest.lat, lon: dest.lon, address: shared ? shared.address : "" };
 }
-// Gedeeld adresboek van clubs (Supabase): wat één coach invult, gebruikt iedereen.
+// Gedeeld adresboek van clubs (Supabase). Elke coach die een adres invult of gebruikt, is één stem;
+// het adres met de meeste stemmen geldt voor iedereen.
 const clubKey = opp => normName(clubFromTeam(opp));
 async function sharedClub(opponent) {
   if (!sb || !user) return null; const key = clubKey(opponent); if (!key) return null;
-  try { const { data } = await sb.from("club_locations").select("name,address,lat,lon").eq("key", key).maybeSingle(); return data || null; } catch (e) { return null; }
+  try { const { data } = await sb.rpc("club_location", { p_key: key }); const row = Array.isArray(data) ? data[0] : data; return row && row.address ? row : null; } catch (e) { return null; }
 }
 async function shareClub(opponent, address, lat, lon) {
   if (!sb || !user || !address || lat == null) return; const key = clubKey(opponent); if (!key) return;
-  try { await sb.from("club_locations").upsert({ key, name: clubFromTeam(opponent), address, lat, lon, updated_by: user.id, updated_at: new Date().toISOString() }); } catch (e) {}
+  try { await sb.from("club_location_votes").upsert({ key, user_id: user.id, name: clubFromTeam(opponent), address, lat, lon, updated_at: new Date().toISOString() }); } catch (e) {}
 }
 // Eigen sportcomplex: opgeslagen coördinaten, anders het adres, anders de club opzoeken op naam.
 async function ensureHome() {
@@ -426,7 +429,7 @@ async function calcMissingTravel(quiet) {
     travelTried.add(m.id);
     setSync("Reistijd berekenen: " + (m.opponent || "") + "…"); if (!quiet) toast("Reistijd berekenen: " + (m.opponent || "") + "…");
     if (!m.address) { const k = S.matches.find(x => x !== m && !x.home && x.address && clubFromTeam(x.opponent).toLowerCase() === clubFromTeam(m.opponent).toLowerCase()); if (k) m.address = k.address; }
-    try { const r = await calcTravel(m.address, m.opponent); m.travel = r.minutes; m.km = r.km; m.travelPlace = r.label; if (!m.address) m.address = r.label.split(",").slice(0, 3).join(","); ok++; }
+    try { const r = await calcTravel(m.address, m.opponent); m.travel = r.minutes; m.km = r.km; m.travelPlace = r.label; if (!m.address) m.address = r.address || r.label.split(",").slice(0, 3).join(","); ok++; }
     catch (e) { fail.push(m.opponent); if (/eigen sportcomplex/.test(e.message)) { toast(e.message); break; } }
   }
   travelBusy = false; save(); render();

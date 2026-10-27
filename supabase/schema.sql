@@ -113,20 +113,52 @@ create policy "coach wijzigt teammedia" on storage.objects for update to authent
 create policy "coach verwijdert teammedia" on storage.objects for delete to authenticated
   using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
 
--- Gedeeld adresboek van clubs: een adres dat één coach invult, gebruikt de app voor iedereen.
-create table if not exists public.club_locations (
-  key        text primary key,          -- genormaliseerde clubnaam, bv. 'olympia28'
+-- Gedeeld adresboek van clubs. Elke coach die een adres invult of gebruikt, telt als één stem.
+-- Het adres met de meeste stemmen geldt voor iedereen; één coach kan het dus niet in zijn eentje veranderen.
+create table if not exists public.club_location_votes (
+  key        text not null,              -- genormaliseerde clubnaam, bv. 'olympia28'
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name       text not null,
   address    text not null,
   lat        double precision not null,
   lon        double precision not null,
-  updated_by uuid default auth.uid(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (key, user_id)
 );
-alter table public.club_locations enable row level security;
-drop policy if exists "coaches lezen clubadressen" on public.club_locations;
-drop policy if exists "coaches voegen clubadressen toe" on public.club_locations;
-drop policy if exists "coaches werken clubadressen bij" on public.club_locations;
-create policy "coaches lezen clubadressen" on public.club_locations for select to authenticated using (true);
-create policy "coaches voegen clubadressen toe" on public.club_locations for insert to authenticated with check (updated_by = auth.uid());
-create policy "coaches werken clubadressen bij" on public.club_locations for update to authenticated using (true) with check (updated_by = auth.uid());
+alter table public.club_location_votes enable row level security;
+drop policy if exists "coaches lezen stemmen" on public.club_location_votes;
+drop policy if exists "coach stemt" on public.club_location_votes;
+drop policy if exists "coach wijzigt eigen stem" on public.club_location_votes;
+drop policy if exists "coach verwijdert eigen stem" on public.club_location_votes;
+create policy "coaches lezen stemmen" on public.club_location_votes for select to authenticated using (true);
+create policy "coach stemt" on public.club_location_votes for insert to authenticated with check (user_id = auth.uid());
+create policy "coach wijzigt eigen stem" on public.club_location_votes for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "coach verwijdert eigen stem" on public.club_location_votes for delete to authenticated using (user_id = auth.uid());
+
+-- Eerdere versie (club_locations) overzetten naar stemmen en opruimen.
+do $$ begin
+  if to_regclass('public.club_locations') is not null then
+    insert into public.club_location_votes (key, user_id, name, address, lat, lon, updated_at)
+      select key, updated_by, name, address, lat, lon, updated_at from public.club_locations where updated_by is not null
+      on conflict do nothing;
+    drop table public.club_locations;
+  end if;
+end $$;
+
+-- Het geldende adres: meeste stemmen; bij gelijke stand het eerst ingevoerde.
+create or replace function public.club_location(p_key text)
+returns table (name text, address text, lat double precision, lon double precision, votes bigint)
+language sql
+stable
+set search_path = public
+as $$
+  select (array_agg(v.name order by v.updated_at))[1],
+         (array_agg(v.address order by v.updated_at))[1],
+         avg(v.lat), avg(v.lon), count(*)
+  from public.club_location_votes v
+  where v.key = p_key
+  group by lower(regexp_replace(v.address, '[^[:alnum:]]', '', 'g'))
+  order by count(*) desc, min(v.updated_at)
+  limit 1;
+$$;
+grant execute on function public.club_location(text) to authenticated;
