@@ -4,7 +4,7 @@
 const LS_KEY = "teamplanner.v1";
 const DEFAULTS = () => ({
   settings: { club: "", team: "", homeAddress: "", arriveBefore: 45, matchMinutes: 60, blocks: 4, onField: 8,
-    formation: "3-2-2", seatsDefault: 3, flagAway: false, washPerMatch: true, keeperFull: true },
+    formation: "3-2-2", seatsDefault: 3, flagAway: false, washPerMatch: true, keeperFull: true, leaderDriveOne: true },
   players: [], matches: [], updatedAt: 0
 });
 let S = DEFAULTS();
@@ -353,11 +353,14 @@ function planDuties(onlyFuture = true) {
     if (!m.home) {
       let cap = 0; const need = pres.length; const taken = [];
       // leiders die altijd rijden gaan eerst mee, buiten de eerlijke verdeling om
-      pres.filter(p => p.leader && p.leaderDrives && !cannotDo(m.id, p.id, "drive")).forEach(p => {
+      let leaders = pres.filter(p => p.leader && p.leaderDrives && !cannotDo(m.id, p.id, "drive"));
+      if (S.settings.leaderDriveOne && leaders.length > 1)
+        leaders = [leaders.sort((a, b) => (count[a.id].drive - count[b.id].drive) || (last[a.id].drive - last[b.id].drive) || a.name.localeCompare(b.name))[0]];
+      leaders.forEach(p => {
         taken.push(p.id); used.add(p.id); duties.drive.push(p.id); cap += Math.max(1, +p.seats || +S.settings.seatsDefault || 3);
       });
       while (cap < need) {
-        const c = pick("drive", p => p.canDrive && !taken.includes(p.id));
+        const c = pick("drive", p => p.canDrive && !taken.includes(p.id) && !(p.leader && p.leaderDrives));
         if (!c) break; taken.push(c.id); duties.drive.push(c.id); cap += Math.max(1, +c.seats || +S.settings.seatsDefault || 3);
       }
     }
@@ -665,7 +668,7 @@ function playerForm(p) {
       <label><input type="checkbox" name="canWash" ${p.canWash !== false ? "checked" : ""}> Wassen</label></div></div>
     <div class="f"><span class="small muted">Leider of trainer</span><div class="checks" style="flex-direction:column">
       <label><input type="checkbox" name="leader" ${p.leader ? "checked" : ""}> Een ouder is leider of trainer van het team</label>
-      <label><input type="checkbox" name="leaderDrives" ${p.leader === undefined || p.leaderDrives !== false ? "checked" : ""}> Rijdt altijd naar uitwedstrijden (telt niet mee in de verdeling)</label>
+      <label><input type="checkbox" name="leaderDrives" ${p.leader === undefined || p.leaderDrives !== false ? "checked" : ""}> Rijdt naar uitwedstrijden (telt niet mee in de verdeling; bij twee leiders kies je bij Instellingen of er één of allebei rijden)</label>
       <label><input type="checkbox" name="leaderNoOther" ${p.leader === undefined || p.leaderNoOther !== false ? "checked" : ""}> Geen grensrechter of wassen</label></div></div>
     <label class="f" style="max-width:240px">Plekken voor kinderen in de auto (incl. eigen kind)<input id="pf-seats" name="seats" type="number" min="1" max="8" value="${esc(p.seats || S.settings.seatsDefault)}"></label>
     <div class="row"><button class="btn primary" type="submit">Opslaan</button><button class="btn ghost" type="button" data-act="cancel">Annuleren</button>
@@ -764,7 +767,8 @@ function vSettings() {
     <h3>Taken</h3>
     <div class="grid2"><label class="f">Standaard plekken per auto (kinderen)<input id="sf-seats" name="seatsDefault" type="number" min="1" max="8" value="${esc(s.seatsDefault)}"></label></div>
     <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook grensrechter bij uitwedstrijden</label>
-    <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label></div>
+    <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label>
+    <label><input type="checkbox" name="leaderDriveOne" ${s.leaderDriveOne !== false ? "checked" : ""}> Bij meerdere leiders rijdt er per uitwedstrijd één (om de beurt)</label></div>
     <h3>Keeper</h3>
     <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Standaard staat de keeper de hele wedstrijd in het doel</label></div>
     <p class="small muted">Per wedstrijd kies je bij Wissels of de reservekeeper de tweede helft keept. De keeper wisselt alleen in de rust. Is de keeper afwezig, dan keept de reservekeeper. Een keeper die de hele wedstrijd staat, maakt meer speelminuten. Het wisselschema verdeelt de rest eerlijk over de veldspelers.</p>
@@ -997,7 +1001,7 @@ document.addEventListener("submit", e => {
     const s = S.settings;
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
-    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull");
+    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.leaderDriveOne = fd.has("leaderDriveOne");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
     ui.clubPick = null; ui.clubSearch = null;
     save(); render(); toast("Instellingen opgeslagen.");
