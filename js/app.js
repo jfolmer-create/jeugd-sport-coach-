@@ -186,7 +186,7 @@ async function uploadMedia(kind, file) {
     const key = isLogo ? "logoUrl" : "photoUrl"; let url;
     if (mode === "cloud") {
       const path = teamId + "/" + kind + "-" + Date.now() + (isLogo ? ".png" : ".jpg");
-      const { error } = await sb.storage.from("team-media").upload(path, blob, { contentType: blob.type, upsert: true });
+      const { error } = await sb.storage.from("team-media").upload(path, blob, { contentType: blob.type });
       if (error) throw new Error("Uploaden lukte niet (" + error.message + "). Is het databasescript al opnieuw uitgevoerd?");
       url = sb.storage.from("team-media").getPublicUrl(path).data.publicUrl;
       await removeMedia(kind, true);

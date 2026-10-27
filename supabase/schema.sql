@@ -106,12 +106,16 @@ insert into storage.buckets (id, name, public) values ('team-media', 'team-media
 drop policy if exists "coach uploadt teammedia" on storage.objects;
 drop policy if exists "coach wijzigt teammedia" on storage.objects;
 drop policy if exists "coach verwijdert teammedia" on storage.objects;
+drop policy if exists "coach leest teammedia" on storage.objects;
+-- Let op: "name" altijd volledig noemen, anders pakt Postgres de teamnaam (teams.name) in plaats van de bestandsnaam.
+create policy "coach leest teammedia" on storage.objects for select to authenticated
+  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(storage.objects.name))[1] and t.owner = auth.uid()));
 create policy "coach uploadt teammedia" on storage.objects for insert to authenticated
-  with check (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+  with check (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(storage.objects.name))[1] and t.owner = auth.uid()));
 create policy "coach wijzigt teammedia" on storage.objects for update to authenticated
-  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(storage.objects.name))[1] and t.owner = auth.uid()));
 create policy "coach verwijdert teammedia" on storage.objects for delete to authenticated
-  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+  using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(storage.objects.name))[1] and t.owner = auth.uid()));
 
 -- Gedeeld adresboek van clubs. Elke coach die een adres invult of gebruikt, telt als één stem.
 -- Het adres met de meeste stemmen geldt voor iedereen; één coach kan het dus niet in zijn eentje veranderen.
