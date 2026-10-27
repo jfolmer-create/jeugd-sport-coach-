@@ -112,3 +112,21 @@ create policy "coach wijzigt teammedia" on storage.objects for update to authent
   using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
 create policy "coach verwijdert teammedia" on storage.objects for delete to authenticated
   using (bucket_id = 'team-media' and exists (select 1 from public.teams t where t.id::text = (storage.foldername(name))[1] and t.owner = auth.uid()));
+
+-- Gedeeld adresboek van clubs: een adres dat één coach invult, gebruikt de app voor iedereen.
+create table if not exists public.club_locations (
+  key        text primary key,          -- genormaliseerde clubnaam, bv. 'olympia28'
+  name       text not null,
+  address    text not null,
+  lat        double precision not null,
+  lon        double precision not null,
+  updated_by uuid default auth.uid(),
+  updated_at timestamptz not null default now()
+);
+alter table public.club_locations enable row level security;
+drop policy if exists "coaches lezen clubadressen" on public.club_locations;
+drop policy if exists "coaches voegen clubadressen toe" on public.club_locations;
+drop policy if exists "coaches werken clubadressen bij" on public.club_locations;
+create policy "coaches lezen clubadressen" on public.club_locations for select to authenticated using (true);
+create policy "coaches voegen clubadressen toe" on public.club_locations for insert to authenticated with check (updated_by = auth.uid());
+create policy "coaches werken clubadressen bij" on public.club_locations for update to authenticated using (true) with check (updated_by = auth.uid());

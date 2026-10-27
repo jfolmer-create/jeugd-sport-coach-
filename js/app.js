@@ -271,13 +271,24 @@ async function calcTravel(address, opponent) {
   if (!home) throw new Error("Je eigen sportcomplex is niet gevonden. Kies je club of vul het adres in bij Instellingen.");
   const tries = [address, clubFromTeam(opponent) && clubFromTeam(opponent) + " sportpark", clubFromTeam(opponent)].filter(Boolean);
   let dest = null, query = "";
-  if (!address) { const c = await findOpponentClub(opponent, home); if (c) { dest = { lat: c.lat, lon: c.lon, label: c.name + (c.city ? ", " + c.city : "") }; query = c.name; } }
+  if (!address) { const sh = await sharedClub(opponent); if (sh) { dest = { lat: sh.lat, lon: sh.lon, label: sh.name + ", " + sh.address }; query = sh.address; } }
+  if (!address && !dest) { const c = await findOpponentClub(opponent, home); if (c) { dest = { lat: c.lat, lon: c.lon, label: c.name + (c.city ? ", " + c.city : "") }; query = c.name; } }
   if (!dest) for (const q of tries) { await sleep(1100); dest = await geocode(q); if (dest) { query = q; break; } }
   if (!dest) throw new Error("Het adres van de uitclub is niet gevonden. Vul het adres in (straat en plaats).");
   const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${home.lon},${home.lat};${dest.lon},${dest.lat}?overview=false`);
   const j = r.ok ? await r.json() : null;
   if (!j || !j.routes || !j.routes.length) throw new Error("Er is geen route gevonden.");
-  return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query };
+  return { minutes: Math.ceil(j.routes[0].duration / 60), km: Math.round(j.routes[0].distance / 1000), label: dest.label, query, lat: dest.lat, lon: dest.lon };
+}
+// Gedeeld adresboek van clubs (Supabase): wat één coach invult, gebruikt iedereen.
+const clubKey = opp => normName(clubFromTeam(opp));
+async function sharedClub(opponent) {
+  if (!sb || !user) return null; const key = clubKey(opponent); if (!key) return null;
+  try { const { data } = await sb.from("club_locations").select("name,address,lat,lon").eq("key", key).maybeSingle(); return data || null; } catch (e) { return null; }
+}
+async function shareClub(opponent, address, lat, lon) {
+  if (!sb || !user || !address || lat == null) return; const key = clubKey(opponent); if (!key) return;
+  try { await sb.from("club_locations").upsert({ key, name: clubFromTeam(opponent), address, lat, lon, updated_by: user.id, updated_at: new Date().toISOString() }); } catch (e) {}
 }
 // Eigen sportcomplex: opgeslagen coördinaten, anders het adres, anders de club opzoeken op naam.
 async function ensureHome() {
@@ -1026,7 +1037,7 @@ document.addEventListener("click", e => {
       const addr = document.getElementById("mf-addr").value.trim(), opp = document.getElementById("mf-opp").value.trim();
       calcTravel(addr, opp).then(r => {
         document.getElementById("mf-travel").value = r.minutes;
-        ui.travelCalc = { minutes: r.minutes, km: r.km, label: r.label, addr };
+        ui.travelCalc = { minutes: r.minutes, km: r.km, label: r.label, addr, lat: r.lat, lon: r.lon };
         info.textContent = "Berekend naar: " + r.label + " (" + r.km + " km, " + r.minutes + " min). Klopt de plek niet? Vul het adres in en bereken opnieuw.";
       }).catch(e => { info.textContent = e.message || "Berekenen lukte niet."; }).finally(() => { btn.disabled = false; });
       break; }
@@ -1106,7 +1117,8 @@ document.addEventListener("submit", e => {
     const newAddr = m.home ? "" : (fd.get("address") || "").trim();
     if (newAddr !== (m.address || "")) { m.travelPlace = ui.travelCalc && ui.travelCalc.addr === newAddr ? ui.travelCalc.label : ""; }
     m.address = newAddr; m.travel = m.home ? 0 : +fd.get("travel") || 0; m.absent = fd.getAll("absent");
-    if (ui.travelCalc && !m.home && +ui.travelCalc.minutes === m.travel) { m.km = ui.travelCalc.km; m.travelPlace = ui.travelCalc.label; }
+    if (ui.travelCalc && !m.home && +ui.travelCalc.minutes === m.travel) { m.km = ui.travelCalc.km; m.travelPlace = ui.travelCalc.label;
+      if (ui.travelCalc.addr && ui.travelCalc.addr === m.address) shareClub(m.opponent, m.address, ui.travelCalc.lat, ui.travelCalc.lon); }
     ui.travelCalc = null;
     if (!id) S.matches.push(m);
     if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid)));
