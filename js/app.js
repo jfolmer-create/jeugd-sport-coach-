@@ -4,7 +4,7 @@
 const LS_KEY = "teamplanner.v1";
 const DEFAULTS = () => ({
   settings: { club: "", team: "", homeAddress: "", arriveBefore: 45, matchMinutes: 60, blocks: 4, onField: 8,
-    formation: "3-2-2", seatsDefault: 3, flagAway: false, washPerMatch: true },
+    formation: "3-2-2", seatsDefault: 3, flagAway: false, washPerMatch: true, keeperFull: true },
   players: [], matches: [], updatedAt: 0
 });
 let S = DEFAULTS();
@@ -116,7 +116,7 @@ document.addEventListener("visibilitychange", async () => {
 // ---------- helpers ----------
 const uid = () => Math.random().toString(36).slice(2, 9);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const POS = { K: "Keeper", V: "Verdediger", M: "Middenvelder", A: "Aanvaller" };
+const POS = { K: "Keeper", R: "Reservekeeper", V: "Verdediger", M: "Middenvelder", A: "Aanvaller" };
 const DUTY = { drive: "Rijden", flag: "Grensrechter", wash: "Wassen" };
 const todayStr = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
 const toMin = t => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
@@ -331,12 +331,22 @@ function planLineup(m) {
   const planned = id => season[id].min + cells[id].filter(c => c !== "-").length * bm;
   const half = Math.ceil(B / 2); const keepers = [];
   const order = (a, b) => planned(a.id) - planned(b.id) || season[a.id].min - season[b.id].min || a.name.localeCompare(b.name);
-  for (let h = 0; h < 2 && h * half < B; h++) {
-    let pool = pres.filter(p => (p.positions || []).includes("K") && !keepers.includes(p.id));
-    if (!pool.length) pool = pres.filter(p => (p.positions || []).includes("K"));
-    if (!pool.length) pool = pres.filter(p => !keepers.includes(p.id));
-    pool.sort((a, b) => season[a.id].keeper - season[b.id].keeper || order(a, b));
-    keepers[h] = pool[0] ? pool[0].id : null;
+  // Keeper eerst, dan reservekeeper, dan wie het minst gespeeld heeft.
+  const has = (p, k) => (p.positions || []).includes(k);
+  const pickKeeper = exclude => {
+    const tiers = [pres.filter(p => has(p, "K")), pres.filter(p => has(p, "R")), pres];
+    for (const tier of tiers) {
+      const pool = tier.filter(p => !exclude.includes(p.id));
+      if (pool.length) return pool.sort((a, b) => season[a.id].keeper - season[b.id].keeper || order(a, b))[0].id;
+    }
+    return null;
+  };
+  if (S.settings.keeperFull !== false) { keepers[0] = keepers[1] = pickKeeper([]); }
+  else {
+    // tweede helft: een andere keeper of de reservekeeper als die er is, anders dezelfde keeper
+    keepers[0] = pickKeeper([]);
+    const second = pickKeeper([keepers[0]]); const sp = pById(second) || {};
+    keepers[1] = second && (has(sp, "K") || has(sp, "R")) ? second : keepers[0];
   }
   for (let b = 0; b < B; b++) {
     const k = keepers[Math.min(1, Math.floor(b / half))];
@@ -346,7 +356,7 @@ function planLineup(m) {
       (planned(x.id) - planned(y.id)) || (satLast(y.id) - satLast(x.id)) || order(x, y));
     const chosen = cands.slice(0, onField - (k ? 1 : 0));
     const free = slots.slice(); const left = [];
-    const flex = p => (p.positions || []).filter(x => x !== "K");
+    const flex = p => (p.positions || []).filter(x => x !== "K" && x !== "R");
     chosen.slice().sort((x, y) => (flex(x).length || 9) - (flex(y).length || 9)).forEach(p => {
       const prev = b > 0 ? cells[p.id][b - 1] : null; const ps = flex(p);
       let i = prev && ps.includes(prev) ? free.indexOf(prev) : -1;
@@ -620,6 +630,9 @@ function vSettings() {
     <div class="grid2"><label class="f">Standaard plekken per auto (kinderen)<input id="sf-seats" name="seatsDefault" type="number" min="1" max="8" value="${esc(s.seatsDefault)}"></label></div>
     <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook grensrechter bij uitwedstrijden</label>
     <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label></div>
+    <h3>Keeper</h3>
+    <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Keeper staat de hele wedstrijd in het doel</label></div>
+    <p class="small muted">Uitgevinkt: de tweede helft keept een andere keeper of de reservekeeper. Is de keeper afwezig, dan keept de reservekeeper. Een keeper die de hele wedstrijd staat, maakt meer speelminuten. Het wisselschema verdeelt de rest eerlijk over de veldspelers.</p>
     <div class="row"><button class="btn primary" type="submit">Opslaan</button></div>
   </form>
   ${accountCard()}
@@ -824,7 +837,7 @@ document.addEventListener("submit", e => {
     const s = S.settings;
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
-    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch");
+    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
     ui.clubPick = null; ui.clubSearch = null;
     save(); render(); toast("Instellingen opgeslagen.");
