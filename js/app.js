@@ -235,8 +235,18 @@ document.addEventListener("visibilitychange", async () => {
 // ---------- helpers ----------
 const uid = () => Math.random().toString(36).slice(2, 9);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const POS = { K: "Keeper", R: "Reservekeeper", V: "Verdediger", M: "Middenvelder", A: "Aanvaller" };
-const PREF = { "": "Geen voorkeur", V: "Verdediger", M: "Middenvelder", A: "Aanvaller" };
+// Posities: een hele linie (V/M/A) of een specifieke plek. Wie een hele linie heeft, kan op elke plek in die linie.
+const POS_GROUPS = [
+  ["Keeper", { K: "Keeper", R: "Reservekeeper" }],
+  ["Verdediging", { V: "Hele verdediging", LB: "Linksback", CV: "Centrale verdediger", RB: "Rechtsback" }],
+  ["Middenveld", { M: "Heel middenveld", LM: "Linksmidden", VM: "Verdedigende mid", CM: "Middenmid", AM: "Aanvallende mid", RM: "Rechtsmidden" }],
+  ["Aanval", { A: "Hele aanval", LA: "Linksbuiten", SP: "Spits", RA: "Rechtsbuiten" }]];
+const POS = Object.assign({}, ...POS_GROUPS.map(g => g[1]));
+const LINE = { LB: "V", CV: "V", RB: "V", LM: "M", VM: "M", CM: "M", AM: "M", RM: "M", LA: "A", SP: "A", RA: "A", V: "V", M: "M", A: "A", K: "K" };
+const lineOf = c => LINE[c] || c;
+const POS_ORDER = ["K", "LB", "CV", "RB", "V", "VM", "LM", "CM", "RM", "AM", "M", "LA", "SP", "RA", "A"];
+const fits = (p, slot) => { const ps = p.positions || []; return ps.includes(slot) || ps.includes(lineOf(slot)); };
+const prefOptions = cur => `<option value="">Geen voorkeur</option>` + POS_GROUPS.slice(1).map(([g, o]) => `<optgroup label="${g}">${Object.entries(o).map(([k, l]) => `<option value="${k}" ${cur === k ? "selected" : ""}>${l}</option>`).join("")}</optgroup>`).join("");
 const DUTY = { drive: "Rijden", flag: "Grensrechter", wash: "Wassen" };
 const todayStr = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
 const toMin = t => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
@@ -514,10 +524,20 @@ function dutyIssues(m) {
 // ---------- lineup planner ----------
 function slotsFor() {
   const parts = String(S.settings.formation || "").split("-").map(n => parseInt(n, 10)).filter(n => n >= 0);
-  const keys = ["V", "M", "A"]; const slots = [];
-  parts.forEach((n, i) => { for (let k = 0; k < n; k++) slots.push(keys[Math.min(i, 2)]); });
+  const D = { 1: ["CV"], 2: ["CV", "CV"], 3: ["LB", "CV", "RB"], 4: ["LB", "CV", "CV", "RB"], 5: ["LB", "CV", "CV", "CV", "RB"] };
+  const Mi = { 1: ["CM"], 2: ["LM", "RM"], 3: ["LM", "CM", "RM"], 4: ["LM", "CM", "CM", "RM"], 5: ["LM", "CM", "CM", "CM", "RM"] };
+  const At = { 1: ["SP"], 2: ["SP", "SP"], 3: ["LA", "SP", "RA"], 4: ["LA", "SP", "SP", "RA"] };
+  const pick = (map, n, fill) => map[n] || Array(n).fill(fill);
+  const slots = []; const L = parts.length;
+  parts.forEach((n, i) => {
+    if (i === 0) slots.push(...pick(D, n, "CV"));
+    else if (i === L - 1 && L > 1) slots.push(...pick(At, n, "SP"));
+    else if (L > 3 && i < L - 2) slots.push(...(n === 1 ? ["VM"] : Array(n).fill("VM"))); // bv. de 2 in 4-2-3-1
+    else if (L > 3) slots.push(...(n === 1 ? ["AM"] : n === 3 ? ["LM", "AM", "RM"] : pick(Mi, n, "CM")));
+    else slots.push(...pick(Mi, n, "CM"));
+  });
   const need = Math.max(0, (+S.settings.onField || 8) - 1);
-  while (slots.length < need) slots.push("M");
+  while (slots.length < need) slots.push("CM");
   return slots.slice(0, need);
 }
 function blockMin() { return (+S.settings.matchMinutes || 60) / Math.max(1, +S.settings.blocks || 1); }
@@ -591,22 +611,24 @@ function planLineup(m) {
       (b === 0 ? missed(x.id) - missed(y.id) : 0) || (planned(x.id) - planned(y.id)) || (satLast(y.id) - satLast(x.id)) || order(x, y));
     const chosen = cands.slice(0, onField - (k ? 1 : 0));
     const free = slots.slice(); const left = [];
-    const flex = p => (p.positions || []).filter(x => x !== "K" && x !== "R");
-    // Eerst krijgt iedereen met een voorkeurspositie die plek (zolang er plek is); wie het minst flexibel is, gaat voor.
+    const flex = p => new Set(free.filter(s => fits(p, s))).size;
+    const prefIdx = p => !p.pref ? -1 : LINE[p.pref] === p.pref ? free.findIndex(s => lineOf(s) === p.pref) : free.indexOf(p.pref);
+    // 1) voorkeursplek (wie het minst flexibel is, gaat voor); 2) zelfde plek als vorig blok; 3) een specifiek aangevinkte plek; 4) elke plek in een aangevinkte linie.
     const rest = [];
-    chosen.slice().sort((x, y) => (flex(x).length || 9) - (flex(y).length || 9)).forEach(p => {
-      const i = p.pref ? free.indexOf(p.pref) : -1;
+    chosen.slice().sort((x, y) => (flex(x) || 99) - (flex(y) || 99)).forEach(p => {
+      const i = prefIdx(p);
       if (i < 0) { rest.push(p); return; }
       cells[p.id][b] = free.splice(i, 1)[0];
     });
-    rest.forEach(p => {
-      const prev = b > 0 ? cells[p.id][b - 1] : null; const ps = flex(p);
-      let i = prev && ps.includes(prev) ? free.indexOf(prev) : -1;
+    rest.sort((x, y) => (flex(x) || 99) - (flex(y) || 99)).forEach(p => {
+      const prev = b > 0 ? cells[p.id][b - 1] : null; const ps = p.positions || [];
+      let i = prev && fits(p, prev) ? free.indexOf(prev) : -1;
       if (i < 0) i = free.findIndex(s => ps.includes(s));
+      if (i < 0) i = free.findIndex(s => fits(p, s));
       if (i < 0) { left.push(p); return; }
       cells[p.id][b] = free.splice(i, 1)[0];
     });
-    left.forEach(p => { cells[p.id][b] = free.length ? free.shift() : "M"; });
+    left.forEach(p => { cells[p.id][b] = free.length ? free.shift() : "CM"; });
   }
   m.lineup = { cells, durs, matchMinutes: +S.settings.matchMinutes || 60, created: Date.now() };
 }
@@ -815,8 +837,8 @@ function playerForm(p) {
       <label class="f">Naam speler<input id="pf-name" name="name" value="${esc(p.name || "")}" required></label>
       <label class="f">Naam ouder(s)<input id="pf-parent" name="parent" value="${esc(p.parent || "")}" placeholder="bv. Sanne & Mark"></label>
     </div>
-    <div class="f"><span class="small muted">Posities</span><div class="checks">${Object.entries(POS).map(([k, l]) => `<label><input type="checkbox" name="pos" value="${k}" ${(p.positions || []).includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
-    <label class="f" style="max-width:240px">Voorkeurspositie<select id="pf-pref" name="pref">${Object.entries(PREF).map(([k, l]) => `<option value="${k}" ${(p.pref || "") === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <div class="f"><span class="small muted">Posities</span>${POS_GROUPS.map(([g, o]) => `<div class="small muted" style="margin-top:6px">${g}</div><div class="checks">${Object.entries(o).map(([k, l]) => `<label><input type="checkbox" name="pos" value="${k}" ${(p.positions || []).includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div>`).join("")}</div>
+    <label class="f" style="max-width:260px">Voorkeurspositie<select id="pf-pref" name="pref">${prefOptions(p.pref || "")}</select></label>
     <div class="f"><span class="small muted">Wat kunnen de ouders doen?</span><div class="checks">
       <label><input type="checkbox" name="canDrive" ${p.canDrive !== false ? "checked" : ""}> Rijden</label>
       <label><input type="checkbox" name="canFlag" ${p.canFlag !== false ? "checked" : ""}> Grensrechter</label>
@@ -843,8 +865,8 @@ function vPlayers() {
     ${list.length ? `<p class="small muted">Tik op een positie om die aan of uit te zetten. Voor ouders, taken en leiders gebruik je Wijzig.</p>` : ""}
     ${list.length ? list.map(p => `<div class="card"><div class="player-line">
       <div><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span>
-      <div class="names" style="margin-top:4px">${Object.entries(POS).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${p.pref === k ? "★ " : on ? "✓ " : ""}${l}</button>`; }).join("")}</div>
-      <label class="small muted prefline">Voorkeur <select data-act="setpref" data-id="${p.id}" aria-label="Voorkeurspositie ${esc(p.name)}">${Object.entries(PREF).map(([k, l]) => `<option value="${k}" ${(p.pref || "") === k ? "selected" : ""}>${l}</option>`).join("")}</select></label></div>
+      ${POS_GROUPS.map(([g, o]) => `<div class="names posrow"><span class="small muted posgroup">${g}</span>${Object.entries(o).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${p.pref === k ? "★ " : on ? "✓ " : ""}${l}</button>`; }).join("")}</div>`).join("")}
+      <label class="small muted prefline">Voorkeur <select data-act="setpref" data-id="${p.id}" aria-label="Voorkeurspositie ${esc(p.name)}">${prefOptions(p.pref || "")}</select></label></div>
       <div class="names">${p.leader ? `<span class="pill home">Leider${p.leaderDrives ? " · rijdt altijd" : ""}</span>` : ""}${["canDrive", "canFlag", "canWash"].map((k, i) => `<span class="pill ${p[k] ? "ok" : "warn"}">${p[k] ? "✓" : "✗"} ${["Rijden", "Grens", "Wassen"][i]}</span>`).join("")}
       <button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div></div>`).join("")
       : `<p class="muted">Nog geen spelers.</p>`}`;
@@ -862,13 +884,14 @@ function vLineup() {
     const counts = Array(B).fill(0); Object.values(m.lineup.cells).forEach(r => r.forEach((c, b) => { if (c !== "-") counts[b]++; }));
     const rows = pres.filter(p => m.lineup.cells[p.id]).sort((a, b) => a.name.localeCompare(b.name));
     const missing = pres.filter(p => !m.lineup.cells[p.id]);
+    const cellOpts = ["K"].concat([...new Set(slotsFor())]);
     table = `<div class="tablewrap"><table><thead><tr><th>Speler</th>${durs.map((d, b) => `<th class="c">${Math.round(startAt[b])}′–${Math.round(startAt[b] + d)}′</th>`).join("")}<th class="c">Deze wedstrijd</th><th class="c">Seizoen vooraf</th></tr></thead><tbody>
-      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + c}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}">${["K", "V", "M", "A", "-"].map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
+      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + lineOf(c)}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}" title="${esc(POS[c] || "")}">${cellOpts.concat(cellOpts.includes(c) ? [] : [c]).concat("-").map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
       <td class="c">${Math.round(lineupMinutes(m, p.id))}′</td><td class="c">${Math.round(season[p.id] ? season[p.id].min : 0)}′</td></tr>`).join("")}
       <tr><td class="muted small">Op het veld</td>${counts.map(n => `<td class="c ${n !== +S.settings.onField ? "" : "muted"}" style="${n !== +S.settings.onField && pres.length >= +S.settings.onField ? "color:var(--bad);font-weight:700" : ""}">${n}</td>`).join("")}<td></td><td></td></tr>
       </tbody></table></div>
       ${missing.length ? `<div class="notice">Nog niet ingedeeld: ${missing.map(p => esc(p.name)).join(", ")}. Maak het schema opnieuw.</div>` : ""}
-      <p class="small muted">K = keeper, V = verdediger, M = middenveld, A = aanval. Pas een vakje aan als je iets anders wilt; de minuten rekenen mee.</p>`;
+      <p class="small muted">${["K"].concat(cellOpts.filter(o => o !== "K")).map(o => o + " = " + (POS[o] || o).toLowerCase()).join(", ")}. Pas een vakje aan als je iets anders wilt; de minuten rekenen mee.</p>`;
   }
   const att = `<details class="card" ${ui.attOpen ? "open" : ""} id="attbox"><summary>Wie is er? ${S.players.length - pres.length ? `<span class="pill warn">${S.players.length - pres.length} afwezig</span>` : ""} ${(m.missedTraining || []).length ? `<span class="pill">${m.missedTraining.length} niet getraind</span>` : ""}</summary>
     <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Speler</th><th class="c">Aanwezig</th><th class="c">Niet getraind</th></tr></thead><tbody>
@@ -1064,7 +1087,7 @@ document.addEventListener("click", e => {
     case "delmatch": if (armed("delm" + id)) { S.matches = S.matches.filter(x => x.id !== id); ui.editMatch = null; save(); render(); } break;
     case "togpos": { const p = pById(id); if (!p) break; p.positions = p.positions || [];
       const k = t.dataset.pos; p.positions = p.positions.includes(k) ? p.positions.filter(x => x !== k) : p.positions.concat(k);
-      if (p.pref && !p.positions.includes(p.pref)) p.pref = "";
+      if (p.pref && !fits(p, p.pref)) p.pref = "";
       save(); render(); break; }
     case "bulkadd": { const el = document.getElementById("bulk-text"); const have = new Set(S.players.map(p => p.name.toLowerCase())); let n = 0, dup = 0;
       (el.value || "").split(/\r?\n/).forEach(line => {
@@ -1131,7 +1154,7 @@ async function login(fd) {
 function lineupText(m) {
   const B = (Object.values(m.lineup.cells)[0] || []).length; const out = ["Opstelling " + fmtDate(m.date) + " " + (m.home ? "vs " : "@ ") + m.opponent];
   for (let b = 0; b < B; b++) {
-    const on = Object.entries(m.lineup.cells).filter(([, r]) => r[b] !== "-").sort((x, y) => "KVMA".indexOf(x[1][b]) - "KVMA".indexOf(y[1][b]));
+    const on = Object.entries(m.lineup.cells).filter(([, r]) => r[b] !== "-").sort((x, y) => POS_ORDER.indexOf(x[1][b]) - POS_ORDER.indexOf(y[1][b]));
     const off = Object.entries(m.lineup.cells).filter(([, r]) => r[b] === "-");
     out.push("Blok " + (b + 1) + ": " + on.map(([id, r]) => pName(id) + " (" + r[b] + ")").join(", ") + (off.length ? " | wissel: " + off.map(([id]) => pName(id)).join(", ") : ""));
   }
@@ -1143,7 +1166,7 @@ document.addEventListener("change", e => {
   if (t.id === "mf-opp") { const k = S.matches.find(x => x.opponent === t.value && !x.home); if (k) { const a = document.getElementById("mf-addr"), tr = document.getElementById("mf-travel"); if (!a.value) a.value = k.address || ""; if (!tr.value) tr.value = k.travel || ""; } return; }
   if (t.dataset.act === "imphome") { const r = ui.importRows[+t.dataset.i]; r.home = t.value === "1"; r.unsure = false; return; }
   if (t.dataset.act === "setpref") { const p = pById(t.dataset.id); if (!p) return; p.pref = t.value; p.positions = p.positions || [];
-    if (p.pref && !p.positions.includes(p.pref)) p.positions.push(p.pref); save(); render(); return; }
+    if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref); save(); render(); return; }
   if (t.dataset.act === "pickteam") { loadTeam(t.value); return; }
   if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; render(); return; }
   if (t.dataset.act === "att" || t.dataset.act === "mt") {
@@ -1188,7 +1211,7 @@ document.addEventListener("submit", e => {
     ui.editMatch = null; save(); render(); toast("Wedstrijd opgeslagen. Verdeel het taakschema opnieuw als er iets veranderd is.");
   } else if (f.id === "playerform") {
     const id = f.dataset.id; const p = id ? pById(id) : { id: uid() };
-    p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos"); p.pref = fd.get("pref") || ""; if (p.pref && !p.positions.includes(p.pref)) p.positions.push(p.pref);
+    p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos"); p.pref = fd.get("pref") || ""; if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref);
     p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash");
     p.leader = fd.has("leader"); p.leaderDrives = fd.has("leaderDrives"); p.leaderNoOther = fd.has("leaderNoOther"); p.seats = +fd.get("seats") || +S.settings.seatsDefault;
     if (!id) S.players.push(p); ui.editPlayer = null; save(); render(); toast("Speler opgeslagen.");
