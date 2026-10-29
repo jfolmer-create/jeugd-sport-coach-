@@ -211,8 +211,9 @@ async function createTeam(fd) {
   const club = (fd.get("club") || "").trim(), team = (fd.get("team") || "").trim(), address = (fd.get("address") || "").trim();
   if (club) data.settings.club = club; if (team) data.settings.team = team; if (address) data.settings.homeAddress = address;
   const age = +((team.match(/(?:JO|MO|O)\s?(\d{1,2})/i) || [])[1] || 0);
-  const pre = !fromLocal && age ? (age <= 9 ? 0 : age <= 11 ? 1 : age === 13 ? 2 : age <= 15 && age >= 14 ? 3 : age <= 17 && age >= 16 ? 4 : age >= 18 ? 5 : -1) : -1;
-  if (pre >= 0) { const P = PRESETS[pre]; Object.assign(data.settings, { onField: P[1], matchMinutes: P[2], blocks: P[3], formation: P[4] }); }
+  const sp = SPORTS[fd.get("sport")] ? fd.get("sport") : "voetbal"; data.settings.sport = sp;
+  const pre = !fromLocal && age ? (sp === "hockey" ? (age <= 10 ? 0 : age <= 12 ? 1 : age <= 14 ? 2 : 3) : (age <= 9 ? 0 : age <= 11 ? 1 : age === 13 ? 2 : age <= 15 && age >= 14 ? 3 : age <= 17 && age >= 16 ? 4 : age >= 18 ? 5 : -1)) : -1;
+  if (pre >= 0) { const P = presetsFor(sp)[pre]; Object.assign(data.settings, { onField: P[1], matchMinutes: P[2], blocks: P[3], formation: P[4] }); }
   const pk = ui.clubPick; if (pk && pk.address === data.settings.homeAddress) data.settings.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
   ui.clubPick = null; ui.clubSearch = null;
   const name = [data.settings.club, data.settings.team].filter(Boolean).join(" ");
@@ -237,18 +238,32 @@ document.addEventListener("visibilitychange", async () => {
 const uid = () => Math.random().toString(36).slice(2, 9);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // Posities: een hele linie (V/M/A) of een specifieke plek. Wie een hele linie heeft, kan op elke plek in die linie.
-const POS_GROUPS = [
+const POS_GROUPS_INIT = [
   ["Keeper", { K: "Keeper", R: "Reservekeeper" }],
   ["Verdediging", { V: "Hele verdediging", LB: "Linksback", CV: "Centrale verdediger", RB: "Rechtsback" }],
   ["Middenveld", { M: "Heel middenveld", LM: "Linksmidden", VM: "Verdedigende mid", CM: "Middenmid", AM: "Aanvallende mid", RM: "Rechtsmidden" }],
   ["Aanval", { A: "Hele aanval", LA: "Linksbuiten", SP: "Spits", RA: "Rechtsbuiten" }]];
-const POS = Object.assign({}, ...POS_GROUPS.map(g => g[1]));
+const POS_GROUPS = POS_GROUPS_INIT;
+const POS_BASE = Object.assign({}, ...POS_GROUPS_INIT.map(g => ({ ...g[1] })));
+const POS_HOCKEY = { V: "Hele achterlinie", LB: "Linksachter", CV: "Centrale verdediger", RB: "Rechtsachter", M: "Heel middenveld", LM: "Linkshalf", VM: "Verdedigende mid", CM: "Midmid", AM: "Aanvallende mid", RM: "Rechtshalf", A: "Hele voorhoede", LA: "Linksbuiten", SP: "Midvoor", RA: "Rechtsbuiten" };
+let POS = {};
+// Labels hangen af van de sport; de codes blijven hetzelfde, zodat een wisselschema altijd leesbaar blijft.
+function setSportLabels() {
+  POS_GROUPS.forEach(g => Object.keys(g[1]).forEach(k => { g[1][k] = (isHockey() && POS_HOCKEY[k]) || POS_BASE[k]; }));
+  POS = Object.assign({}, ...POS_GROUPS.map(g => g[1]));
+}
 const LINE = { LB: "V", CV: "V", RB: "V", LM: "M", VM: "M", CM: "M", AM: "M", RM: "M", LA: "A", SP: "A", RA: "A", V: "V", M: "M", A: "A", K: "K" };
 const lineOf = c => LINE[c] || c;
 const POS_ORDER = ["K", "LB", "CV", "RB", "V", "VM", "LM", "CM", "RM", "AM", "M", "LA", "SP", "RA", "A"];
 const fits = (p, slot) => { const ps = p.positions || []; return ps.includes(slot) || ps.includes(lineOf(slot)); };
 const prefOptions = cur => `<option value="">Geen voorkeur</option>` + POS_GROUPS.slice(1).map(([g, o]) => `<optgroup label="${g}">${Object.entries(o).map(([k, l]) => `<option value="${k}" ${cur === k ? "selected" : ""}>${l}</option>`).join("")}</optgroup>`).join("");
+// ---------- sport ----------
+const SPORTS = { voetbal: "Voetbal", hockey: "Hockey" };
+const sport = () => (S && S.settings && SPORTS[S.settings.sport]) ? S.settings.sport : "voetbal";
+const isHockey = () => sport() === "hockey";
+const flagWord = () => isHockey() ? "Scheidsrechter" : "Grensrechter"; // bij jeugdhockey fluiten ouders, bij voetbal vlaggen ze
 const DUTY = { drive: "Rijden", flag: "Grensrechter", wash: "Wassen" };
+const dutyName = k => t(k === "flag" ? flagWord() : DUTY[k]);
 const todayStr = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
 const toMin = t => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 const fmt = m => { m = ((m % 1440) + 1440) % 1440; return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); };
@@ -336,7 +351,7 @@ async function ensureHome() {
   st.homeCoords = { lat: c.lat, lon: c.lon, address: st.homeAddress, label: c.name }; save();
   return st.homeCoords;
 }
-const normName = x => String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|sportvereniging)\b/g, " ").replace(/[^\p{L}\p{N}]+/gu, "");
+const normName = x => String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|sportvereniging|hc|mhc|hv|mhv|hockeyclub|hockeyvereniging)\b/g, " ").replace(/[^\p{L}\p{N}]+/gu, "");
 function nameScore(c, q) { const a = normName(c.name), b = normName(q); if (!b) return 0; return a === b ? 3 : a.startsWith(b) || b.startsWith(a) ? 2 : a.includes(b) ? 1 : 0; }
 function bestByName(list, q, near) {
   if (!list || !list.length) return null;
@@ -345,16 +360,17 @@ function bestByName(list, q, near) {
 // Voetbalclubs zoeken in OpenStreetMap (Overpass). Geeft [{name, lat, lon, city, street}].
 const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
 const qlSafe = x => x.replace(/[^\p{L}\p{N}'-]/gu, "");
+const sportTag = () => ((mode === "newteam" ? ui.newSport : sport()) === "hockey") ? "field_hockey|hockey" : "soccer";
 async function searchClubs(q, near) {
-  const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1);
+  const words = String(q || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|hc|mhc|hv|mhv|hockeyclub|hockeyvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1);
   if (!words.length) return [];
   const rx = words.map(qlSafe).filter(Boolean).join(".*"); if (!rx) return [];
   // zoekgebied: rond het eigen sportcomplex (snel), anders heel Nederland
   const bb = near ? [near.lat - 1.2, near.lon - 1.8, near.lat + 1.2, near.lon + 1.8].map(x => x.toFixed(3)).join(",") : "50.7,3.2,53.7,7.3";
   const ql = `[out:json][timeout:25][bbox:${bb}];
-(nwr["club"]["sport"~"soccer"]["name"~"${rx}",i];
+(nwr["club"]["sport"~"${sportTag()}"]["name"~"${rx}",i];
  nwr["club"="sport"]["name"~"${rx}",i]["sport"!~"."];
- nwr["sport"~"soccer"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i];
+ nwr["sport"~"${sportTag()}"]["leisure"~"sports_centre|pitch|stadium|sports_hall"]["name"~"${rx}",i];
  nwr["leisure"~"sports_centre|pitch|stadium"]["operator"~"${rx}",i];);
 out center tags 80;`;
   let j = null;
@@ -388,7 +404,7 @@ async function addressFor(c) {
   } catch (e) { return c.city ? c.name + ", " + c.city : c.name; }
 }
 function clubSearchBlock(p) {
-  return `<div class="f"><span>Zoek je club in de lijst van voetbalclubs</span>
+  return `<div class="f"><span>Zoek je club in OpenStreetMap</span>
     <div class="row" style="flex-wrap:nowrap"><input id="${p}-cs" placeholder="bv. Balk" aria-label="Clubnaam zoeken" data-cs="${p}"><button class="btn" type="button" data-act="clubsearch" data-p="${p}">Zoek</button></div>
     <div id="${p}-csr" class="stack"></div></div>`;
 }
@@ -429,14 +445,14 @@ async function findOpponentClub(opponent, home) {
     } catch (e) {}
   }
   // laatste poging: adreszoeker rond het eigen sportcomplex
-  for (const q of [name + " voetbal", name, words[0] && words[0] + " voetbal"].filter(Boolean)) {
+  for (const q of [name + (isHockey() ? " hockey" : " voetbal"), name, words[0] && words[0] + (isHockey() ? " hockey" : " voetbal")].filter(Boolean)) {
     await sleep(1100);
     const g = await geocodeNear(q, home).catch(() => null);
     if (g) return { name: g.label.split(",")[0], lat: g.lat, lon: g.lon, city: (g.label.split(",").slice(-4, -3)[0] || "").trim() };
   }
   return null;
 }
-function normWords(x) { return String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean); }
+function normWords(x) { return String(x || "").toLowerCase().replace(/\b(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|hc|mhc|hv|mhv|hockeyclub|hockeyvereniging)\b/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean); }
 async function geocodeNear(q, near) {
   const vb = near ? `&viewbox=${near.lon - 1.5},${near.lat + 1},${near.lon + 1.5},${near.lat - 1}&bounded=1` : "";
   const r = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=nl&accept-language=nl" + vb + "&q=" + encodeURIComponent(q));
@@ -646,7 +662,7 @@ function matchText(m) {
   const day = (() => { try { return new Date(m.date + "T12:00").toLocaleDateString(window.I18N ? I18N.locale : "nl-NL", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return m.date; } })();
   const names = ids => ids.map(pName).join(" & "); const pl = ids => joinParents(ids);
   const L = [];
-  L.push("⚽ *" + t("Wedstrijd {day}", { day }) + "* ⚽");
+  const ball = isHockey() ? "🏑" : "⚽"; L.push(ball + " *" + t("Wedstrijd {day}", { day }) + "* " + ball);
   L.push("");
   L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + " " + (m.home ? t("(thuis)") : t("(uit)")));
   if (!m.home) {
@@ -656,7 +672,7 @@ function matchText(m) {
   }
   L.push("⏰ " + t("Aanwezig:") + " *" + tm.arrive + "* " + (m.home ? t("in de kleedkamer") : t("bij {club}", { club: m.opponent ? clubFromTeam(m.opponent) || m.opponent : t("de uitclub") })));
   L.push("🟢 " + t("Aftrap:") + " *" + tm.ko + "*");
-  if ((d.flag || []).length) L.push("🚩 " + t("Grensrechter:") + " " + pl(d.flag));
+  if ((d.flag || []).length) L.push((isHockey() ? "🟨 " : "🚩 ") + t(flagWord() + ":") + " " + pl(d.flag));
   const pw = prevWash(m).filter(id => pById(id));
   if (st.washPerMatch) {
     if (pw.length) L.push("🧺 " + t("Wastas mee naar de wedstrijd:") + " *" + names(pw) + "*");
@@ -671,11 +687,12 @@ function matchText(m) {
 // ---------- rendering ----------
 const TABS = [["planning", "Planning"], ["matches", "Wedstrijden"], ["players", "Spelers"], ["lineup", "Wissels"], ["season", "Seizoen"], ["settings", "Instellingen"]];
 function render() {
+  setSportLabels(); PRESETS = presetsFor(sport());
   const ls = document.getElementById("lang");
   if (ls && window.I18N && !ls.options.length) ls.innerHTML = Object.entries(I18N.LANGS).map(([k, l]) => `<option value="${k}" ${k === I18N.lang ? "selected" : ""}>${l}</option>`).join("");
   const s = S.settings; const inTeam = ["local", "cloud", "shared"].includes(mode);
   document.getElementById("brand").innerHTML = (inTeam && s.logoUrl ? `<img class="logo" src="${esc(s.logoUrl)}" alt="">` : "") +
-    "<span>" + (inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || "Jeugdvoetbal") + "</small>" : "Teamplanner<small>Jeugdvoetbal</small>") + "</span>";
+    "<span>" + (inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || (isHockey() ? "Jeugdhockey" : "Jeugdvoetbal")) + "</small>" : "Teamplanner<small>Jeugdsport</small>") + "</span>";
   const tabs = mode === "shared" ? TABS.filter(t => t[0] === "planning") : inTeam ? TABS : [];
   document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${t(l)}</button>`).join("");
   const main = document.getElementById("main");
@@ -706,7 +723,8 @@ function vLogin() {
 function vNewTeam() {
   const local = readLocal(LS_KEY); const hasLocal = local && (local.players.length || local.matches.length);
   return `<form class="card" id="newteamform" style="max-width:520px;justify-self:center;width:100%"><h2>${teams.length ? "Nieuw team" : "Welkom, coach"}</h2>
-    <p class="muted">Kies je club en vul je team in. Je kunt later meer teams toevoegen.</p>
+    <p class="muted">Kies je sport en je club, en vul je team in. Je kunt later meer teams toevoegen.</p>
+    <label class="f" style="max-width:240px">Sport<select id="nt-sport" name="sport" data-act="ntsport">${Object.entries(SPORTS).map(([k, l]) => `<option value="${k}" ${(ui.newSport || "voetbal") === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     ${clubSearchBlock("nt")}
     <div class="grid2">
       <label class="f">Club<input id="nt-club" name="club" required placeholder="bv. VV Balk"></label>
@@ -761,7 +779,7 @@ function matchCard(m, isNext) {
     </div>
     <div class="duties">
       ${m.home ? "" : dutyRow(t("Rijden"), d.drive)}
-      ${(m.home || S.settings.flagAway) ? dutyRow(t("Grensrechter"), d.flag) : ""}
+      ${(m.home || S.settings.flagAway) ? dutyRow(t(flagWord()), d.flag) : ""}
       ${S.settings.washPerMatch ? dutyRow(t("Wassen"), d.wash) : ""}
       ${(m.absent || []).length ? `<div class="duty"><span>${t("Afwezig")}</span><div class="warn-ink">${m.absent.map(id => esc(pName(id))).join(", ")}</div></div>` : ""}
     </div>
@@ -782,10 +800,10 @@ function matchCard(m, isNext) {
 }
 function dutyEditor(m) {
   const d = m.duties || {}; const fams = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
-  const sel = (duty, i, val) => `<select id="de-${m.id}-${duty}-${i}" data-act="dutyset" data-m="${m.id}" data-d="${duty}" data-i="${i}" aria-label="${DUTY[duty]} ${i + 1}">
+  const sel = (duty, i, val) => `<select id="de-${m.id}-${duty}-${i}" data-act="dutyset" data-m="${m.id}" data-d="${duty}" data-i="${i}" aria-label="${dutyName(duty)} ${i + 1}">
     <option value="">${val ? "— weghalen —" : "+ toevoegen"}</option>${fams.map(p => `<option value="${p.id}" ${p.id === val ? "selected" : ""}>${esc(parentLabel(p.id))}</option>`).join("")}</select>`;
   const row = (duty, multi) => { const cur = d[duty] || []; const slots = multi ? cur.concat([""]) : (cur.length ? cur : [""]);
-    return `<div class="duty"><span>${DUTY[duty]}</span><div class="stack">${slots.map((v, i) => sel(duty, i, v)).join("")}</div></div>`; };
+    return `<div class="duty"><span>${dutyName(duty)}</span><div class="stack">${slots.map((v, i) => sel(duty, i, v)).join("")}</div></div>`; };
   return `<div class="card" style="padding:10px;background:var(--bg)"><p class="small muted">Ruilen ouders onderling? Pas het hier aan. Deze wedstrijd blijft daarna zoals jij hem instelt.</p><div class="duties">
     ${m.home ? "" : row("drive", true)}${(m.home || S.settings.flagAway) ? row("flag", false) : ""}${S.settings.washPerMatch ? row("wash", false) : ""}</div></div>`;
 }
@@ -829,7 +847,7 @@ function vMatches() {
   return `<div class="row between"><h2>Wedstrijden</h2><button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button></div>
     ${editing ? matchForm(editing) : ""}
     <details class="card" id="importbox" ${ui.importRows ? "open" : ""}><summary>Programma plakken vanaf de clubsite</summary>
-      <p class="small muted">Open het programma van je team op de clubsite of in de Voetbal.nl-app, selecteer de wedstrijden, kopieer ze en plak ze hieronder. Het formaat maakt niet uit: de planner zoekt zelf de datum, aftrap en de twee teams, ook als die op aparte regels staan. Klopt er iets niet, pas het dan aan in de lijst hieronder.${ownKeys().length ? "" : " Vul eerst je club in bij Instellingen, dan herkent hij thuis en uit."}</p>
+      <p class="small muted">Open het programma van je team op de clubsite of in de app van je bond (bv. Voetbal.nl of de KNHB Match-app), selecteer de wedstrijden, kopieer ze en plak ze hieronder. Het formaat maakt niet uit: de planner zoekt zelf de datum, aftrap en de twee teams, ook als die op aparte regels staan. Klopt er iets niet, pas het dan aan in de lijst hieronder.${ownKeys().length ? "" : " Vul eerst je club in bij Instellingen, dan herkent hij thuis en uit."}</p>
       <textarea id="imp-text" aria-label="Geplakt programma" placeholder="za 2 nov 10:30  VV Balk JO15-2 - SC Joure JO15-1">${esc(ui.importText || "")}</textarea>
       <div class="row"><button class="btn" type="button" data-act="parse">Lees programma</button></div>
       ${ui.importRows ? (ui.importRows.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Datum</th><th>Aftrap</th><th>T/U</th><th>Tegenstander</th></tr></thead><tbody>
@@ -855,7 +873,7 @@ function playerForm(p) {
     <label class="f" style="max-width:260px">Voorkeurspositie<select id="pf-pref" name="pref">${prefOptions(p.pref || "")}</select></label>
     <div class="f"><span class="small muted">Wat kunnen de ouders doen?</span><div class="checks">
       <label><input type="checkbox" name="canDrive" ${p.canDrive !== false ? "checked" : ""}> Rijden</label>
-      <label><input type="checkbox" name="canFlag" ${p.canFlag !== false ? "checked" : ""}> Grensrechter</label>
+      <label><input type="checkbox" name="canFlag" ${p.canFlag !== false ? "checked" : ""}> ${flagWord()}</label>
       <label><input type="checkbox" name="canWash" ${p.canWash !== false ? "checked" : ""}> Wassen</label></div></div>
     <div class="f"><span class="small muted">Leider of trainer</span><div class="checks" style="flex-direction:column">
       <label><input type="checkbox" name="leader" ${p.leader ? "checked" : ""}> Een ouder is leider of trainer van het team</label>
@@ -940,7 +958,7 @@ function vSeason() {
   ${rows.map(p => { const x = st[p.id]; return `<tr><td>${esc(p.name)}</td><td><div class="bar"><i style="width:${(x.min / max * 100).toFixed(0)}%"></i></div></td><td class="c">${Math.round(x.min)}</td><td class="c">${x.avail ? Math.round(x.min / x.avail * 100) + "%" : "–"}</td><td class="c">${x.keeper}</td></tr>`; }).join("")}
   </tbody></table></div>
   <h3>Taken per gezin (hele seizoen, ook gepland)</h3>
-  <div class="tablewrap"><table><thead><tr><th>Gezin</th><th class="c">Rijden</th><th class="c">Grensrechter</th><th class="c">Wassen</th><th class="c">Totaal</th></tr></thead><tbody>
+  <div class="tablewrap"><table><thead><tr><th>Gezin</th><th class="c">Rijden</th><th class="c">${flagWord()}</th><th class="c">Wassen</th><th class="c">Totaal</th></tr></thead><tbody>
   ${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => { const d = dc[p.id]; return `<tr><td>${esc(parentLabel(p.id))}</td><td class="c">${p.canDrive ? d.drive : "–"}</td><td class="c">${p.canFlag ? d.flag : "–"}</td><td class="c">${p.canWash ? d.wash : "–"}</td><td class="c"><strong>${d.drive + d.flag + d.wash}</strong></td></tr>`; }).join("")}
   </tbody></table></div>`;
 }
@@ -962,6 +980,7 @@ function vSettings() {
   <form class="card" id="settingsform"><h3>Club en team</h3>
     ${clubSearchBlock("sf")}
     <div class="grid2">
+      <label class="f">Sport<select id="sf-sport" name="sport">${Object.entries(SPORTS).map(([k, l]) => `<option value="${k}" ${sport() === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       <label class="f">Club<input id="sf-club" name="club" value="${esc(s.club)}" placeholder="bv. VV De Meeuwen"></label>
       <label class="f">Team<input id="sf-team" name="team" value="${esc(s.team)}" placeholder="bv. JO11-2"></label>
     </div>
@@ -979,7 +998,7 @@ function vSettings() {
     <div class="row">${PRESETS.map((p, i) => `<button class="btn" type="button" data-act="preset" data-i="${i}">${p[0]}</button>`).join("")}</div></div>
     <h3>Taken</h3>
     <div class="grid2"><label class="f">Standaard plekken per auto (kinderen)<input id="sf-seats" name="seatsDefault" type="number" min="1" max="8" value="${esc(s.seatsDefault)}"></label></div>
-    <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook grensrechter bij uitwedstrijden</label>
+    <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook ${flagWord().toLowerCase()} bij uitwedstrijden</label>
     <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label>
     <label><input type="checkbox" name="leaderDriveOne" ${s.leaderDriveOne !== false ? "checked" : ""}> Bij meerdere leiders rijdt er per uitwedstrijd één (om de beurt)</label></div>
     <h3>Keeper</h3>
@@ -999,8 +1018,11 @@ function vSettings() {
 }
 
 // label, onField, minutes, blocks, formation
-const PRESETS = [["6 tegen 6", 6, 40, 4, "2-1-2"], ["8 tegen 8", 8, 60, 4, "3-2-2"], ["JO13 11×11", 11, 60, 4, "4-3-3"],
+const PRESETS_VOETBAL = [["6 tegen 6", 6, 40, 4, "2-1-2"], ["8 tegen 8", 8, 60, 4, "3-2-2"], ["JO13 11×11", 11, 60, 4, "4-3-3"],
   ["JO14/JO15 11×11", 11, 70, 4, "4-3-3"], ["JO16/JO17 11×11", 11, 80, 4, "4-3-3"], ["JO19 11×11", 11, 90, 6, "4-3-3"]];
+const PRESETS_HOCKEY = [["6-tal (JO9/JO10)", 6, 50, 4, "2-2-1"], ["8-tal (JO11/JO12)", 8, 60, 4, "3-2-2"], ["11-tal (JO14)", 11, 70, 4, "4-3-3"], ["11-tal (JO16/JO18)", 11, 70, 4, "4-3-3"]];
+let PRESETS = PRESETS_VOETBAL;
+const presetsFor = sp => sp === "hockey" ? PRESETS_HOCKEY : PRESETS_VOETBAL;
 
 // ---------- program import (pasted text from a club site) ----------
 const MONTHS = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, nov: 11, dec: 12 };
@@ -1017,10 +1039,10 @@ function findDate(s) {
   return null;
 }
 function ownKeys() {
-  const stop = /^(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|de|het)$/i;
+  const stop = /^(vv|sv|v\.v\.|s\.v\.|fc|rksv|vvv|sc|cvv|asv|voetbalvereniging|hc|mhc|hv|mhv|hockeyclub|hockeyvereniging|de|het)$/i;
   return String(S.settings.club || "").toLowerCase().split(/\s+/).filter(w => w.length > 1 && !stop.test(w));
 }
-const TEAMCODE = /\b(?:JO|MO|O|JM)\s?\d{1,2}(?:\s?-\s?\d{1,2})?\b|\b(?:VR|Vrouwen|Heren|Senioren|Zondag|Zaterdag)\s?\d{0,2}\b/i;
+const TEAMCODE = /\b(?:JO|MO|O|JM)\s?\d{1,2}(?:\s?-\s?\d{1,2})?\b|\b(?:VR|Vrouwen|Heren|Dames|Senioren|Zondag|Zaterdag)\s?\d{0,2}\b|\b[JM][A-F]\d{1,2}\b/i;
 const NOT_TEAM = /^(veld|uitslag|scheidsrechter|scheids|accommodatie|locatie|wedstrijd|programma|thuis|uit|competitie|beker|oefen|vriendschappelijk|kleedkamer|aanvang|datum|tijd|sportpark|afgelast|status|klasse|poule|info|route|details|verzamelen|vertrek)\b/i;
 const WEEKDAY = /\b(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag|ma|di|wo|do|vr|za|zo)\b\.?/ig;
 function parseProgram(text) {
@@ -1178,6 +1200,7 @@ function lineupText(m) {
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.id === "lang") { I18N.set(t.value); render(); return; }
+  if (t.id === "nt-sport") { ui.newSport = t.value; return; }
   if (t.id === "mf-home") { document.getElementById("awayfields").hidden = t.value === "1"; return; }
   if (t.id === "mf-opp") { const k = S.matches.find(x => x.opponent === t.value && !x.home); if (k) { const a = document.getElementById("mf-addr"), tr = document.getElementById("mf-travel"); if (!a.value) a.value = k.address || ""; if (!tr.value) tr.value = k.travel || ""; } return; }
   if (t.dataset.act === "imphome") { const r = ui.importRows[+t.dataset.i]; r.home = t.value === "1"; r.unsure = false; return; }
@@ -1234,6 +1257,7 @@ document.addEventListener("submit", e => {
   } else if (f.id === "settingsform") {
     const s = S.settings;
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
+    if (SPORTS[fd.get("sport")]) s.sport = fd.get("sport");
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
     s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.splitLast = fd.has("splitLast"); s.leaderDriveOne = fd.has("leaderDriveOne");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };

@@ -33,6 +33,8 @@
     "Reistijd": { en: "Travel", de: "Fahrzeit", fr: "Trajet", ar: "مدة السفر" },
     "Rijden": { en: "Drivers", de: "Fahren", fr: "Chauffeurs", ar: "السائقون" },
     "Grensrechter": { en: "Linesman", de: "Linienrichter", fr: "Juge de touche", ar: "مراقب الخط" },
+    "Scheidsrechter": { en: "Umpire", de: "Schiedsrichter", fr: "Arbitre", ar: "الحكم" },
+    "Scheidsrechter:": { en: "Umpire:", de: "Schiedsrichter:", fr: "Arbitre :", ar: "الحكم:" },
     "Wassen": { en: "Laundry", de: "Wäsche", fr: "Lessive", ar: "الغسيل" },
     "Afwezig": { en: "Absent", de: "Abwesend", fr: "Absents", ar: "غائبون" },
     "niemand": { en: "nobody", de: "niemand", fr: "personne", ar: "لا أحد" },
