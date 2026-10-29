@@ -73,8 +73,8 @@ input[type=checkbox] { width: auto; accent-color: var(--pitch); transform: scale
 .date { font-family: var(--display); font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .opp { font-family: var(--display); font-size: 22px; font-weight: 700; line-height: 1.15; }
 .times { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 8px 0; }
-.time { flex: 1; min-width: 0; padding: 0 10px; border-left: 1px solid var(--line); }
-.time:first-child { border-left: 0; padding-left: 0; }
+.time { flex: 1; min-width: 0; padding: 0 10px; border-inline-start: 1px solid var(--line); }
+.time:first-child { border-inline-start: 0; padding-inline-start: 0; }
 .time b { display: block; font-family: var(--display); font-size: 22px; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .time span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
 .time.key b { color: var(--warn); }
@@ -88,7 +88,7 @@ input[type=checkbox] { width: auto; accent-color: var(--pitch); transform: scale
 .names .pill { font-size: 13px; font-weight: 500; }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
-th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: start; white-space: nowrap; }
 th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; background: var(--bg); }
 tr:last-child td { border-bottom: 0; }
 td.c, th.c { text-align: center; }
@@ -127,3 +127,7 @@ button.pill.postog.home { border-color: transparent; }
 .posrow { margin-top: 6px; align-items: center; }
 .posgroup { min-width: 86px; }
 .cell-V select { color: var(--ink); }
+.top-right { display: flex; align-items: center; gap: 10px; }
+.lang { width: auto; min-height: 30px; padding: 2px 6px; font-size: 13px; background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; }
+.lang option { color: #111; }
+[dir="rtl"] .opp, [dir="rtl"] .date { letter-spacing: 0; }

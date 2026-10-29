@@ -1,4 +1,5 @@
 (() => {
+const t = (x, v) => (window.I18N ? window.I18N.t(x, v) : x);
 "use strict";
 // ---------- state ----------
 const LS_KEY = "teamplanner.v1";
@@ -138,20 +139,20 @@ function roundCard() {
 }
 function parentCard() {
   if (mode !== "shared") return "";
-  if (!round.open) return `<div class="notice">Het schema staat vast. Kun je niet op je beurt? Ruil zelf met een andere ouder en laat het de coach weten.</div>`;
+  if (!round.open) return `<div class="notice">${t("Het schema staat vast. Kun je niet op je beurt? Ruil zelf met een andere ouder en laat het de coach weten.")}</div>`;
   const ms = sorted().filter(m => round.matches.includes(m.id));
   const list = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
   let pid = ui.avChild; if (!pid) { try { pid = localStorage.getItem("teamplanner.child." + shareToken); } catch (e) {} }
   const p = pById(pid);
   const box = (m, what, label) => `<label><input type="checkbox" name="${m.id}" value="${what}" ${p && cannotDo(m.id, p.id, what) ? "checked" : ""}> ${label}</label>`;
   // "ouder is er niet" wordt bewaard als: kan niet rijden, vlaggen en wassen
-  const parentBox = m => `<label><input type="checkbox" name="${m.id}" value="parent" ${p && ["drive", "flag", "wash"].every(w => cannotDo(m.id, p.id, w)) ? "checked" : ""}> Ouder is er niet (geen taak)</label>`;
-  return `<form class="card" id="availform"><h3>Geef door wie er niet is</h3>
-    <p class="small muted">De coach maakt het schema voor de komende wedstrijden. Vink per wedstrijd aan of je kind er niet is, of dat jij als ouder er niet bent (dan krijg je die dag geen taak). Je kunt het aanpassen tot de coach het schema maakt.</p>
-    <label class="f">Mijn kind<select id="av-child" data-act="avchild"><option value="">Kies…</option>${list.map(x => `<option value="${x.id}" ${p && p.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
-    ${p ? `<div class="stack">${ms.map(m => `<div class="card" style="padding:10px"><strong>${esc(fmtDate(m.date))} · ${m.home ? "thuis tegen" : "uit bij"} ${esc(m.opponent)}</strong>
-      <div class="checks">${box(m, "absent", esc(p.name) + " is er niet")}${parentBox(m)}</div></div>`).join("")}</div>
-      <div class="row"><button class="btn primary" type="submit">Doorgeven</button></div>` : ""}
+  const parentBox = m => `<label><input type="checkbox" name="${m.id}" value="parent" ${p && ["drive", "flag", "wash"].every(w => cannotDo(m.id, p.id, w)) ? "checked" : ""}> ${t("Ouder is er niet (geen taak)")}</label>`;
+  return `<form class="card" id="availform"><h3>${t("Geef door wie er niet is")}</h3>
+    <p class="small muted">${t("De coach maakt het schema voor de komende wedstrijden. Vink per wedstrijd aan of je kind er niet is, of dat jij als ouder er niet bent (dan krijg je die dag geen taak). Je kunt het aanpassen tot de coach het schema maakt.")}</p>
+    <label class="f">${t("Mijn kind")}<select id="av-child" data-act="avchild"><option value="">${t("Kies…")}</option>${list.map(x => `<option value="${x.id}" ${p && p.id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+    ${p ? `<div class="stack">${ms.map(m => `<div class="card" style="padding:10px"><strong>${esc(fmtDate(m.date))} · ${m.home ? t("thuis tegen") : t("uit bij")} ${esc(m.opponent)}</strong>
+      <div class="checks">${box(m, "absent", t("{name} is er niet", { name: esc(p.name) }))}${parentBox(m)}</div></div>`).join("")}</div>
+      <div class="row"><button class="btn primary" type="submit">${t("Doorgeven")}</button></div>` : ""}
   </form>`;
 }
 async function submitAvail(f) {
@@ -159,9 +160,9 @@ async function submitAvail(f) {
   const fd = new FormData(f);
   const entries = round.matches.map(mid => { const v = fd.getAll(mid); const c = v.filter(x => x !== "parent"); if (v.includes("parent")) c.push("drive", "flag", "wash"); return { match: mid, cannot: c }; });
   const { data, error } = await sb.rpc("submit_availability", { token: shareToken, p_player: pid, entries });
-  if (error || data === false) { toast("Doorgeven lukte niet. Misschien heeft de coach het schema al gemaakt."); return; }
+  if (error || data === false) { toast(t("Doorgeven lukte niet. Misschien heeft de coach het schema al gemaakt.")); return; }
   avail = avail.filter(a => a.player !== pid || !round.matches.includes(a.match)).concat(entries.map(e => ({ player: pid, match: e.match, cannot: e.cannot })));
-  toast("Doorgegeven, dank je wel!"); render();
+  toast(t("Doorgegeven, dank je wel!")); render();
 }
 // ---------- logo en teamfoto ----------
 function resizeImage(file, max, type, quality) {
@@ -251,12 +252,12 @@ const DUTY = { drive: "Rijden", flag: "Grensrechter", wash: "Wassen" };
 const todayStr = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
 const toMin = t => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 const fmt = m => { m = ((m % 1440) + 1440) % 1440; return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); };
-const fmtDate = d => { try { return new Date(d + "T12:00").toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" }); } catch (e) { return d; } };
+const fmtDate = d => { try { return new Date(d + "T12:00").toLocaleDateString(window.I18N ? I18N.locale : "nl-NL", { weekday: "short", day: "numeric", month: "short" }); } catch (e) { return d; } };
 const byDate = (a, b) => (a.date + a.time).localeCompare(b.date + b.time);
 const sorted = () => S.matches.slice().sort(byDate);
 const pById = id => S.players.find(p => p.id === id);
 const pName = id => (pById(id) || {}).name || "?";
-const parentLabel = id => { const p = pById(id); if (!p) return "?"; return p.parent ? p.parent + " (" + p.name + ")" : "ouders van " + p.name; };
+const parentLabel = id => { const p = pById(id); if (!p) return "?"; return p.parent ? p.parent + " (" + p.name + ")" : t("ouders van {name}", { name: p.name }); };
 const present = m => S.players.filter(p => !(m.absent || []).includes(p.id));
 const isPast = m => m.date < todayStr();
 function times(m) {
@@ -465,9 +466,9 @@ async function calcMissingTravel(quiet) {
 }
 function toast(t) { const el = document.getElementById("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
 async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast("Gekopieerd. Plak het in de groepsapp."); }
+  try { await navigator.clipboard.writeText(text); toast(t("Gekopieerd. Plak het in de groepsapp.")); }
   catch (e) { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); toast("Gekopieerd."); } catch (e2) { toast("Selecteer en kopieer de tekst handmatig."); } ta.remove(); }
+    try { document.execCommand("copy"); toast(t("Gekopieerd.")); } catch (e2) { toast("Selecteer en kopieer de tekst handmatig."); } ta.remove(); }
 }
 
 // ---------- duty planner ----------
@@ -640,41 +641,43 @@ function prevWash(m) {
 }
 // Bericht voor de groepsapp (WhatsApp: *vet*, _schuin_).
 function matchText(m) {
-  const t = times(m); const d = m.duties || {}; const st = S.settings;
-  const own = [st.club, st.team].filter(Boolean).join(" ") || "Wij";
-  const day = (() => { try { return new Date(m.date + "T12:00").toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return m.date; } })();
-  const names = ids => ids.map(pName).join(" & ");
+  const tm = times(m); const d = m.duties || {}; const st = S.settings;
+  const own = [st.club, st.team].filter(Boolean).join(" ") || t("Wij");
+  const day = (() => { try { return new Date(m.date + "T12:00").toLocaleDateString(window.I18N ? I18N.locale : "nl-NL", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return m.date; } })();
+  const names = ids => ids.map(pName).join(" & "); const pl = ids => joinParents(ids);
   const L = [];
-  L.push("⚽ *Wedstrijd " + day + "* ⚽");
+  L.push("⚽ *" + t("Wedstrijd {day}", { day }) + "* ⚽");
   L.push("");
-  L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + (m.home ? " (thuis)" : " (uit)"));
+  L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + " " + (m.home ? t("(thuis)") : t("(uit)")));
   if (!m.home) {
-    L.push("🚗 Vertrek vanaf ons sportcomplex: " + (t.depart === "?" ? "volgt nog" : "*" + t.depart + "*"));
-    if ((d.drive || []).length) L.push("   Rijders: " + d.drive.map(parentLabel).join(", "));
+    L.push("🚗 " + t("Vertrek vanaf ons sportcomplex:") + " " + (tm.depart === "?" ? t("volgt nog") : "*" + tm.depart + "*"));
+    if ((d.drive || []).length) L.push("   " + t("Rijders:") + " " + pl(d.drive));
     if (m.address) L.push("📍 " + m.address);
   }
-  L.push("⏰ Aanwezig: *" + t.arrive + "*" + (m.home ? " in de kleedkamer" : " bij " + (m.opponent ? clubFromTeam(m.opponent) || m.opponent : "de uitclub")));
-  L.push("🟢 Aftrap: *" + t.ko + "*");
-  if ((d.flag || []).length) L.push("🚩 Grensrechter: " + d.flag.map(parentLabel).join(", "));
+  L.push("⏰ " + t("Aanwezig:") + " *" + tm.arrive + "* " + (m.home ? t("in de kleedkamer") : t("bij {club}", { club: m.opponent ? clubFromTeam(m.opponent) || m.opponent : t("de uitclub") })));
+  L.push("🟢 " + t("Aftrap:") + " *" + tm.ko + "*");
+  if ((d.flag || []).length) L.push("🚩 " + t("Grensrechter:") + " " + pl(d.flag));
   const pw = prevWash(m).filter(id => pById(id));
   if (st.washPerMatch) {
-    if (pw.length) L.push("🧺 Wastas mee naar de wedstrijd: *" + names(pw) + "*");
-    if ((d.wash || []).length) L.push("🧺 Wastas mee naar huis (wassen): *" + names(d.wash) + "*");
+    if (pw.length) L.push("🧺 " + t("Wastas mee naar de wedstrijd:") + " *" + names(pw) + "*");
+    if ((d.wash || []).length) L.push("🧺 " + t("Wastas mee naar huis (wassen):") + " *" + names(d.wash) + "*");
   }
-  if ((m.absent || []).length) L.push("🤕 Afwezig: " + m.absent.map(pName).join(", "));
+  if ((m.absent || []).length) L.push("🤕 " + t("Afwezig:") + " " + m.absent.map(pName).join(", "));
   L.push("");
-  L.push("Kun je niet op je beurt? Ruil even met een andere ouder. Zet 'm op, " + (st.team || "team") + "! 💪");
+  L.push(t("Kun je niet op je beurt? Ruil even met een andere ouder. Zet 'm op, {team}! 💪", { team: st.team || t("team") }));
   return L.join("\n");
 }
 
 // ---------- rendering ----------
 const TABS = [["planning", "Planning"], ["matches", "Wedstrijden"], ["players", "Spelers"], ["lineup", "Wissels"], ["season", "Seizoen"], ["settings", "Instellingen"]];
 function render() {
+  const ls = document.getElementById("lang");
+  if (ls && window.I18N && !ls.options.length) ls.innerHTML = Object.entries(I18N.LANGS).map(([k, l]) => `<option value="${k}" ${k === I18N.lang ? "selected" : ""}>${l}</option>`).join("");
   const s = S.settings; const inTeam = ["local", "cloud", "shared"].includes(mode);
   document.getElementById("brand").innerHTML = (inTeam && s.logoUrl ? `<img class="logo" src="${esc(s.logoUrl)}" alt="">` : "") +
     "<span>" + (inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || "Jeugdvoetbal") + "</small>" : "Teamplanner<small>Jeugdvoetbal</small>") + "</span>";
   const tabs = mode === "shared" ? TABS.filter(t => t[0] === "planning") : inTeam ? TABS : [];
-  document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${l}</button>`).join("");
+  document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${t(l)}</button>`).join("");
   const main = document.getElementById("main");
   const st = { el: document.activeElement && document.activeElement.id };
   if (!inTeam) { main.innerHTML = ({ loading: vLoading, login: vLogin, newteam: vNewTeam, error: vError }[mode] || vLoading)(); return; }
@@ -686,7 +689,7 @@ function render() {
   }
   if (st.el) { const el = document.getElementById(st.el); if (el) el.focus(); }
 }
-function vLoading() { return `<div class="card empty"><p class="muted">Laden…</p></div>`; }
+function vLoading() { return `<div class="card empty"><p class="muted">${t("Laden…")}</p></div>`; }
 function vError() { return `<div class="card empty"><h2>Dat lukt niet</h2><p class="muted">${esc(errorText)}</p><a class="btn" href="${location.pathname}">Naar de beginpagina</a></div>`; }
 function vLogin() {
   return `<form class="card" id="loginform" style="max-width:460px;justify-self:center;width:100%"><h2>Inloggen</h2>
@@ -735,38 +738,40 @@ function emptyStart() {
 }
 // "ouders van Bram, Daan en Finn" in plaats van drie keer "ouders van".
 function joinParents(ids) {
-  const L = ids.map(parentLabel); let seen = false;
-  const parts = L.map(l => { if (/^ouders van /.test(l)) { if (seen) return l.slice(11); seen = true; } return l; });
-  return parts.length > 1 ? parts.slice(0, -1).join(", ") + " en " + parts[parts.length - 1] : parts.join("");
+  const and = " " + t("en") + " "; const list = arr => arr.length > 1 ? arr.slice(0, -1).join(", ") + and + arr[arr.length - 1] : arr.join("");
+  const ps = ids.map(pById).filter(Boolean); const named = ps.filter(p => p.parent), kids = ps.filter(p => !p.parent);
+  const parts = named.map(p => p.parent + " (" + p.name + ")");
+  if (kids.length) parts.push(t("ouders van {name}", { name: list(kids.map(p => p.name)) }));
+  return list(parts);
 }
 function dutyRow(label, ids, extra) {
-  return `<div class="duty"><span>${label}</span><div>${ids && ids.length ? esc(joinParents(ids)) : '<span class="muted">niemand</span>'}${extra || ""}</div></div>`;
+  return `<div class="duty"><span>${label}</span><div>${ids && ids.length ? esc(joinParents(ids)) : '<span class="muted">${t("niemand")}</span>'}${extra || ""}</div></div>`;
 }
 function matchCard(m, isNext) {
-  const t = times(m); const d = m.duties || {}; const issues = dutyIssues(m);
+  const tm = times(m); const d = m.duties || {}; const issues = dutyIssues(m);
   return `<article class="card ${isNext ? "next" : ""}">
-    <div class="row between"><span class="date">${esc(fmtDate(m.date))}${isNext ? " · eerstvolgende" : ""}</span>
-      <span class="row">${m.locked ? '<span class="pill lock">vastgezet</span>' : ""}<span class="pill ${m.home ? "home" : "away"}">${m.home ? "THUIS" : "UIT"}</span></span></div>
-    <div class="opp">${m.home ? "" : "@ "}${esc(m.opponent || "Tegenstander?")}</div>
+    <div class="row between"><span class="date">${esc(fmtDate(m.date))}${isNext ? " · " + t("eerstvolgende") : ""}</span>
+      <span class="row">${m.locked ? `<span class="pill lock">${t("vastgezet")}</span>` : ""}<span class="pill ${m.home ? "home" : "away"}">${m.home ? t("THUIS") : t("UIT")}</span></span></div>
+    <div class="opp"><bdi>${m.home ? "" : "@ "}${esc(m.opponent || t("Tegenstander?"))}</bdi></div>
     <div class="times">
-      ${m.home ? "" : `<div class="time key"><span>Vertrek</span><b>${t.depart}</b></div>`}
-      <div class="time ${m.home ? "key" : ""}"><span>Aanwezig</span><b>${t.arrive}</b></div>
-      <div class="time"><span>Aftrap</span><b>${t.ko}</b></div>
-      ${m.home ? "" : `<div class="time"><span>Reistijd</span><b>${+m.travel || "?"}${+m.travel ? "′" : ""}</b></div>`}
+      ${m.home ? "" : `<div class="time key"><span>${t("Vertrek")}</span><b>${tm.depart}</b></div>`}
+      <div class="time ${m.home ? "key" : ""}"><span>${t("Aanwezig")}</span><b>${tm.arrive}</b></div>
+      <div class="time"><span>${t("Aftrap")}</span><b>${tm.ko}</b></div>
+      ${m.home ? "" : `<div class="time"><span>${t("Reistijd")}</span><b>${+m.travel || "?"}${+m.travel ? "′" : ""}</b></div>`}
     </div>
     <div class="duties">
-      ${m.home ? "" : dutyRow("Rijden", d.drive)}
-      ${(m.home || S.settings.flagAway) ? dutyRow("Grensrechter", d.flag) : ""}
-      ${S.settings.washPerMatch ? dutyRow("Wassen", d.wash) : ""}
-      ${(m.absent || []).length ? `<div class="duty"><span>Afwezig</span><div class="warn-ink">${m.absent.map(id => esc(pName(id))).join(", ")}</div></div>` : ""}
+      ${m.home ? "" : dutyRow(t("Rijden"), d.drive)}
+      ${(m.home || S.settings.flagAway) ? dutyRow(t("Grensrechter"), d.flag) : ""}
+      ${S.settings.washPerMatch ? dutyRow(t("Wassen"), d.wash) : ""}
+      ${(m.absent || []).length ? `<div class="duty"><span>${t("Afwezig")}</span><div class="warn-ink">${m.absent.map(id => esc(pName(id))).join(", ")}</div></div>` : ""}
     </div>
     ${ui.editDuties === m.id && canEdit() ? dutyEditor(m) : ""}
     ${!m.home && !+m.travel && canEdit() ? `<div class="notice">Nog geen reistijd, dus de vertrektijd klopt niet. <button class="btn" data-act="calcall">Bereken reistijden</button></div>` : ""}
     ${issues.map(i => `<div class="notice">${esc(i)}</div>`).join("")}
     <div class="row actions">
-      <button class="btn" data-act="copy" data-id="${m.id}">Kopieer bericht</button>
-      ${!m.home && m.address ? `<a class="btn ghost" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(m.address)}" target="_blank" rel="noopener">Route</a>` : ""}
-      ${canEdit() ? `<button class="btn ghost" data-act="more" data-id="${m.id}" aria-expanded="${ui.more === m.id}">${ui.more === m.id ? "Minder ▴" : "Meer ▾"}</button>` : ""}
+      <button class="btn" data-act="copy" data-id="${m.id}">${t("Kopieer bericht")}</button>
+      ${!m.home && m.address ? `<a class="btn ghost" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(m.address)}" target="_blank" rel="noopener">${t("Route")}</a>` : ""}
+      ${canEdit() ? `<button class="btn ghost" data-act="more" data-id="${m.id}" aria-expanded="${ui.more === m.id}">${ui.more === m.id ? t("Minder ▴") : t("Meer ▾")}</button>` : ""}
     </div>
     ${canEdit() && ui.more === m.id ? `<div class="row actions more">
       <button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig / afwezigen</button>
@@ -785,16 +790,16 @@ function dutyEditor(m) {
     ${m.home ? "" : row("drive", true)}${(m.home || S.settings.flagAway) ? row("flag", false) : ""}${S.settings.washPerMatch ? row("wash", false) : ""}</div></div>`;
 }
 function vPlanning() {
-  if (!S.players.length && !S.matches.length) return canEdit() ? emptyStart() : `<div class="card empty"><p class="muted">De coach heeft nog geen wedstrijden ingepland.</p></div>`;
+  if (!S.players.length && !S.matches.length) return canEdit() ? emptyStart() : `<div class="card empty"><p class="muted">${t("De coach heeft nog geen wedstrijden ingepland.")}</p></div>`;
   const today = todayStr(); const up = sorted().filter(m => m.date >= today);
   const noDuty = up.filter(m => !m.duties).length;
   return `${S.settings.photoUrl ? `<img class="teamphoto" src="${esc(S.settings.photoUrl)}" alt="Teamfoto ${esc(S.settings.team)}">` : ""}
-    <div class="row between"><div><h2>Komende wedstrijden</h2><p class="muted small">Aanwezig ${S.settings.arriveBefore} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.</p></div>
+    <div class="row between"><div><h2>${t("Komende wedstrijden")}</h2><p class="muted small">${t("Aanwezig {n} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.", { n: S.settings.arriveBefore })}</p></div>
     ${canEdit() ? `<button class="btn primary" data-act="plan">${noDuty ? "Maak taakschema" : "Taakschema opnieuw verdelen"}</button>` : ""}</div>
     <p class="muted small" ${canEdit() ? "" : "hidden"}>Vastgezette en gespeelde wedstrijden blijven zoals ze zijn. De rest wordt eerlijk verdeeld: wie het minst vaak aan de beurt was, gaat voor.</p>
     ${roundCard()}${parentCard()}
-    ${up.length ? up.map((m, i) => matchCard(m, i === 0)).join("") : `<div class="card empty"><p class="muted">Nog geen komende wedstrijden.</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
-    ${up.length ? `<div class="row"><button class="btn" data-act="copyall">Kopieer hele schema</button>${canEdit() && up.some(m => !m.home && !+m.travel) ? '<button class="btn" data-act="calcall">Bereken ontbrekende reistijden</button>' : ""}</div>` : ""}`;
+    ${up.length ? up.map((m, i) => matchCard(m, i === 0)).join("") : `<div class="card empty"><p class="muted">${t("Nog geen komende wedstrijden.")}</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
+    ${up.length ? `<div class="row"><button class="btn" data-act="copyall">${t("Kopieer hele schema")}</button>${canEdit() && up.some(m => !m.home && !+m.travel) ? '<button class="btn" data-act="calcall">Bereken ontbrekende reistijden</button>' : ""}</div>` : ""}`;
 }
 function matchForm(m) {
   const isNew = !m.id; const known = [...new Map(S.matches.filter(x => !x.home && x.opponent).map(x => [x.opponent, x])).values()];
@@ -1172,6 +1177,7 @@ function lineupText(m) {
 }
 document.addEventListener("change", e => {
   const t = e.target;
+  if (t.id === "lang") { I18N.set(t.value); render(); return; }
   if (t.id === "mf-home") { document.getElementById("awayfields").hidden = t.value === "1"; return; }
   if (t.id === "mf-opp") { const k = S.matches.find(x => x.opponent === t.value && !x.home); if (k) { const a = document.getElementById("mf-addr"), tr = document.getElementById("mf-travel"); if (!a.value) a.value = k.address || ""; if (!tr.value) tr.value = k.travel || ""; } return; }
   if (t.dataset.act === "imphome") { const r = ui.importRows[+t.dataset.i]; r.home = t.value === "1"; r.unsure = false; return; }
