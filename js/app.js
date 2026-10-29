@@ -733,8 +733,14 @@ function emptyStart() {
   <div class="row" style="justify-content:center"><button class="btn primary" data-act="go" data-tab="settings">Begin met mijn team</button>
   <button class="btn" data-act="sample">Bekijk met voorbeeldteam</button></div></div>`;
 }
+// "ouders van Bram, Daan en Finn" in plaats van drie keer "ouders van".
+function joinParents(ids) {
+  const L = ids.map(parentLabel); let seen = false;
+  const parts = L.map(l => { if (/^ouders van /.test(l)) { if (seen) return l.slice(11); seen = true; } return l; });
+  return parts.length > 1 ? parts.slice(0, -1).join(", ") + " en " + parts[parts.length - 1] : parts.join("");
+}
 function dutyRow(label, ids, extra) {
-  return `<div class="duty"><span>${label}</span><div class="names">${ids && ids.length ? ids.map(id => `<span class="pill">${esc(parentLabel(id))}</span>`).join("") : '<span class="muted small">niemand</span>'}${extra || ""}</div></div>`;
+  return `<div class="duty"><span>${label}</span><div>${ids && ids.length ? esc(joinParents(ids)) : '<span class="muted">niemand</span>'}${extra || ""}</div></div>`;
 }
 function matchCard(m, isNext) {
   const t = times(m); const d = m.duties || {}; const issues = dutyIssues(m);
@@ -743,28 +749,31 @@ function matchCard(m, isNext) {
       <span class="row">${m.locked ? '<span class="pill lock">vastgezet</span>' : ""}<span class="pill ${m.home ? "home" : "away"}">${m.home ? "THUIS" : "UIT"}</span></span></div>
     <div class="opp">${m.home ? "" : "@ "}${esc(m.opponent || "Tegenstander?")}</div>
     <div class="times">
-      ${m.home ? "" : `<div class="time key"><span>Vertrek thuisclub</span><b>${t.depart}</b></div>`}
+      ${m.home ? "" : `<div class="time key"><span>Vertrek</span><b>${t.depart}</b></div>`}
       <div class="time ${m.home ? "key" : ""}"><span>Aanwezig</span><b>${t.arrive}</b></div>
       <div class="time"><span>Aftrap</span><b>${t.ko}</b></div>
-      ${m.home ? "" : `<div class="time"><span>Reistijd</span><b>${+m.travel || 0}′</b></div>`}
+      ${m.home ? "" : `<div class="time"><span>Reistijd</span><b>${+m.travel || "?"}${+m.travel ? "′" : ""}</b></div>`}
     </div>
     <div class="duties">
       ${m.home ? "" : dutyRow("Rijden", d.drive)}
       ${(m.home || S.settings.flagAway) ? dutyRow("Grensrechter", d.flag) : ""}
       ${S.settings.washPerMatch ? dutyRow("Wassen", d.wash) : ""}
-      ${(m.absent || []).length ? `<div class="duty"><span>Afwezig</span><div class="names">${m.absent.map(id => `<span class="pill warn">${esc(pName(id))}</span>`).join("")}</div></div>` : ""}
+      ${(m.absent || []).length ? `<div class="duty"><span>Afwezig</span><div class="warn-ink">${m.absent.map(id => esc(pName(id))).join(", ")}</div></div>` : ""}
     </div>
     ${ui.editDuties === m.id && canEdit() ? dutyEditor(m) : ""}
     ${!m.home && !+m.travel && canEdit() ? `<div class="notice">Nog geen reistijd, dus de vertrektijd klopt niet. <button class="btn" data-act="calcall">Bereken reistijden</button></div>` : ""}
     ${issues.map(i => `<div class="notice">${esc(i)}</div>`).join("")}
-    <div class="row">
-      <button class="btn" data-act="copy" data-id="${m.id}">Kopieer bericht voor de app</button>
+    <div class="row actions">
+      <button class="btn" data-act="copy" data-id="${m.id}">Kopieer bericht</button>
       ${!m.home && m.address ? `<a class="btn ghost" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(m.address)}" target="_blank" rel="noopener">Route</a>` : ""}
-      ${canEdit() ? `<button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig / afwezigen</button>
-      <button class="btn ghost" data-act="lock" data-id="${m.id}">${m.locked ? "Losmaken" : "Vastzetten"}</button>
+      ${canEdit() ? `<button class="btn ghost" data-act="more" data-id="${m.id}" aria-expanded="${ui.more === m.id}">${ui.more === m.id ? "Minder ▴" : "Meer ▾"}</button>` : ""}
+    </div>
+    ${canEdit() && ui.more === m.id ? `<div class="row actions more">
+      <button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig / afwezigen</button>
       <button class="btn ghost" data-act="tolineup" data-id="${m.id}">Wisselschema</button>
-      <button class="btn ghost" data-act="editduties" data-id="${m.id}">${ui.editDuties === m.id ? "Klaar met ruilen" : "Taken ruilen"}</button>` : ""}
-    </div></article>`;
+      <button class="btn ghost" data-act="editduties" data-id="${m.id}">${ui.editDuties === m.id ? "Klaar met ruilen" : "Taken ruilen"}</button>
+      <button class="btn ghost" data-act="lock" data-id="${m.id}">${m.locked ? "Losmaken" : "Vastzetten"}</button>
+    </div>` : ""}</article>`;
 }
 function dutyEditor(m) {
   const d = m.duties || {}; const fams = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
@@ -1074,6 +1083,7 @@ document.addEventListener("click", e => {
   const armed = k => { if (ui.arm === k) { ui.arm = null; return true; } ui.arm = k; render(); return false; };
   const m = id && S.matches.find(x => x.id === id);
   switch (a) {
+    case "more": ui.more = ui.more === id ? null : id; render(); break;
     case "go": ui.tab = t.dataset.tab; render(); break;
     case "sample": loadSample(); break;
     case "plan": planDuties(); save(); render(); toast("Taakschema verdeeld."); break;
