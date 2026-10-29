@@ -500,12 +500,15 @@ function planDuties(onlyFuture = true) {
   list.forEach((m, i) => {
     if (m.locked || (onlyFuture && m.date < today)) { tally(m, i); return; }
     const pres = present(m).filter(p => !cannotDo(m.id, p.id, "absent")); const used = new Set(); const duties = { drive: [], flag: [], wash: [] };
+    // Eén taak per gezin per wedstrijd; alleen gezinnen met "twee ouders helpen" kunnen er twee krijgen.
+    const nUsed = {}; const use = id => { used.add(id); nUsed[id] = (nUsed[id] || 0) + 1; };
+    const room = p => (nUsed[p.id] || 0) < (p.twoParents ? 2 : 1);
     const pick = (duty, can) => {
-      const cands = pres.filter(p => can(p) && count[p.id] && !cannotDo(m.id, p.id, duty));
+      const cands = pres.filter(p => can(p) && room(p) && count[p.id] && !cannotDo(m.id, p.id, duty));
       if (!cands.length) return null;
       cands.sort((a, b) => (used.has(a.id) - used.has(b.id)) || (count[a.id][duty] - count[b.id][duty]) ||
         (last[a.id][duty] - last[b.id][duty]) || a.name.localeCompare(b.name));
-      const c = cands[0]; used.add(c.id); return c;
+      const c = cands[0]; use(c.id); return c;
     };
     if (!m.home) {
       let cap = 0; const need = pres.length; const taken = [];
@@ -514,7 +517,7 @@ function planDuties(onlyFuture = true) {
       if (S.settings.leaderDriveOne && leaders.length > 1)
         leaders = [leaders.sort((a, b) => (count[a.id].drive - count[b.id].drive) || (last[a.id].drive - last[b.id].drive) || a.name.localeCompare(b.name))[0]];
       leaders.forEach(p => {
-        taken.push(p.id); used.add(p.id); duties.drive.push(p.id); cap += Math.max(1, +p.seats || +S.settings.seatsDefault || 3);
+        taken.push(p.id); use(p.id); duties.drive.push(p.id); cap += Math.max(1, +p.seats || +S.settings.seatsDefault || 3);
       });
       while (cap < need) {
         const c = pick("drive", p => p.canDrive && !taken.includes(p.id) && !(p.leader && p.leaderDrives));
@@ -874,7 +877,8 @@ function playerForm(p) {
     <div class="f"><span class="small muted">Wat kunnen de ouders doen?</span><div class="checks">
       <label><input type="checkbox" name="canDrive" ${p.canDrive !== false ? "checked" : ""}> Rijden</label>
       <label><input type="checkbox" name="canFlag" ${p.canFlag !== false ? "checked" : ""}> ${flagWord()}</label>
-      <label><input type="checkbox" name="canWash" ${p.canWash !== false ? "checked" : ""}> Wassen</label></div></div>
+      <label><input type="checkbox" name="canWash" ${p.canWash !== false ? "checked" : ""}> Wassen</label></div>
+      <div class="checks"><label><input type="checkbox" name="twoParents" ${p.twoParents ? "checked" : ""}> Twee ouders die allebei helpen: dit gezin kan op één wedstrijddag twee taken krijgen</label></div></div>
     <div class="f"><span class="small muted">Leider of trainer</span><div class="checks" style="flex-direction:column">
       <label><input type="checkbox" name="leader" ${p.leader ? "checked" : ""}> Een ouder is leider of trainer van het team</label>
       <label><input type="checkbox" name="leaderDrives" ${p.leader === undefined || p.leaderDrives !== false ? "checked" : ""}> Rijdt naar uitwedstrijden (telt niet mee in de verdeling; bij twee leiders kies je bij Instellingen of er één of allebei rijden)</label>
@@ -1251,7 +1255,7 @@ document.addEventListener("submit", e => {
   } else if (f.id === "playerform") {
     const id = f.dataset.id; const p = id ? pById(id) : { id: uid() };
     p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos"); p.pref = fd.get("pref") || ""; if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref);
-    p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash");
+    p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash"); p.twoParents = fd.has("twoParents");
     p.leader = fd.has("leader"); p.leaderDrives = fd.has("leaderDrives"); p.leaderNoOther = fd.has("leaderNoOther"); p.seats = +fd.get("seats") || +S.settings.seatsDefault;
     if (!id) S.players.push(p); ui.editPlayer = null; save(); render(); toast("Speler opgeslagen.");
   } else if (f.id === "settingsform") {
