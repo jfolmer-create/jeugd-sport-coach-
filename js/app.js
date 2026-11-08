@@ -859,10 +859,12 @@ function vMatches() {
   const editing = ui.editMatch ? (ui.editMatch === "new" ? {} : S.matches.find(m => m.id === ui.editMatch)) : null;
   return `<div class="row between"><h2>Wedstrijden</h2><button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button></div>
     ${editing ? matchForm(editing) : ""}
-    <details class="card" id="importbox" ${ui.importRows ? "open" : ""}><summary>Programma plakken vanaf de clubsite</summary>
+    <details class="card" id="importbox" ${ui.importRows ? "open" : ""}><summary>Programma plakken of screenshot uploaden</summary>
       <p class="small muted">Open het programma van je team op de clubsite of in de app van je bond (bv. Voetbal.nl of de KNHB Match-app), selecteer de wedstrijden, kopieer ze en plak ze hieronder. Het formaat maakt niet uit: de planner zoekt zelf de datum, aftrap en de twee teams, ook als die op aparte regels staan. Klopt er iets niet, pas het dan aan in de lijst hieronder.${ownKeys().length ? "" : " Vul eerst je club in bij Instellingen, dan herkent hij thuis en uit."}</p>
       <textarea id="imp-text" aria-label="Geplakt programma" placeholder="za 2 nov 10:30  VV Balk JO15-2 - SC Joure JO15-1">${esc(ui.importText || "")}</textarea>
-      <div class="row"><button class="btn" type="button" data-act="parse">Lees programma</button></div>
+      <div class="row"><button class="btn" type="button" data-act="parse">Lees programma</button>
+        <label class="btn ghost">📷 Screenshot uploaden<input type="file" accept="image/*" multiple data-ocr hidden></label></div>
+      <p class="small muted">Een screenshot werkt ook: de planner leest de tekst op je telefoon uit (dat duurt de eerste keer even). Controleer daarna wel de lijst.</p>
       ${ui.importRows ? (ui.importRows.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Datum</th><th>Aftrap</th><th>T/U</th><th>Tegenstander</th></tr></thead><tbody>
         ${ui.importRows.map((r, i) => `<tr style="${r.dup ? "opacity:.55" : ""}"><td><input type="checkbox" id="imp-on-${i}" data-act="impon" data-i="${i}" ${r.dup ? "" : "checked"} aria-label="Toevoegen"></td><td>${esc(fmtDate(r.date))}</td><td>${r.time}</td>
         <td><select id="imp-home-${i}" data-act="imphome" data-i="${i}" style="width:84px"><option value="1" ${r.home ? "selected" : ""}>Thuis</option><option value="0" ${r.home ? "" : "selected"}>Uit</option></select>${r.unsure ? ' <span class="pill warn">?</span>' : ""}</td>
@@ -1039,6 +1041,23 @@ const PRESETS_HOCKEY = [["6-tal (JO9/JO10)", 6, 50, 4, "2-2-1"], ["8-tal (JO11/J
 let PRESETS = PRESETS_VOETBAL;
 const presetsFor = sp => sp === "hockey" ? PRESETS_HOCKEY : PRESETS_VOETBAL;
 
+// ---------- screenshot uitlezen (OCR met Tesseract, draait in de browser; er gaat geen beeld naar een server) ----------
+const TESS = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("laden mislukt")); document.head.appendChild(s); }); }
+async function readScreenshots(files) {
+  try {
+    toast("Screenshot uitlezen…");
+    if (!window.Tesseract) await loadScript((window.OCR_PATHS && OCR_PATHS.script) || TESS);
+    const opts = Object.assign({ logger: x => { if (x.status === "recognizing text") toast("Screenshot uitlezen… " + Math.round(x.progress * 100) + "%"); } }, (window.OCR_PATHS && OCR_PATHS.options) || {});
+    const worker = await Tesseract.createWorker("nld", 1, opts);
+    let text = "";
+    for (const f of files) { const { data } = await worker.recognize(f); text += (text ? "\n\n" : "") + data.text; }
+    await worker.terminate();
+    ui.importText = text.trim(); ui.importRows = parseProgram(ui.importText); ui.importRows.forEach(r => r.on = !r.dup); render();
+    const box = document.getElementById("importbox"); if (box) { box.open = true; box.scrollIntoView({ block: "start" }); }
+    toast(ui.importRows.length ? ui.importRows.length + " wedstrijd(en) gevonden. Controleer de lijst." : "Geen wedstrijden herkend. Probeer een scherpere screenshot, of plak de tekst.");
+  } catch (e) { toast("Uitlezen lukte niet (" + (e.message || e) + "). Plak de tekst dan in het vak."); }
+}
 // ---------- program import (pasted text from a club site) ----------
 const MONTHS = { jan: 1, feb: 2, mrt: 3, maa: 3, apr: 4, mei: 5, jun: 6, jul: 7, aug: 8, sep: 9, okt: 10, nov: 11, dec: 12 };
 function seasonYear(month) { const n = new Date(); const start = n.getMonth() + 1 >= 7 ? n.getFullYear() : n.getFullYear() - 1; return month >= 7 ? start : start + 1; }
@@ -1237,6 +1256,7 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "dutyset") { const m = S.matches.find(x => x.id === t.dataset.m); m.duties = m.duties || { drive: [], flag: [], wash: [] };
     const arr = (m.duties[t.dataset.d] || []).slice(); arr[+t.dataset.i] = t.value; m.duties[t.dataset.d] = arr.filter(Boolean);
     m.locked = true; save(); render(); return; }
+  if (t.hasAttribute("data-ocr") && t.files && t.files.length) { readScreenshots([...t.files]); t.value = ""; return; }
   if (t.dataset.upload && t.files && t.files[0]) { uploadMedia(t.dataset.upload, t.files[0]); t.value = ""; return; }
   if (t.dataset.act === "avchild") { ui.avChild = t.value; try { localStorage.setItem("teamplanner.child." + shareToken, t.value); } catch (x) {} render(); return; }
   if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
