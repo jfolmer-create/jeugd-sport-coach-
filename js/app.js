@@ -526,7 +526,17 @@ function planDuties(onlyFuture = true) {
     }
     const free = p => !(p.leader && p.leaderNoOther);
     if (m.home || S.settings.flagAway) { const c = pick("flag", p => p.canFlag && free(p)); if (c) duties.flag.push(c.id); }
-    if (S.settings.washPerMatch) { const c = pick("wash", p => p.canWash && free(p)); if (c) duties.wash.push(c.id); }
+    if (S.settings.washPerMatch) {
+      let c = null;
+      // Standaard neemt een ouder die die dag al rijdt of vlagt de wastas mee naar huis (dat is handig); eerlijk verdeeld onder hen.
+      if (S.settings.washWithDuty !== false) {
+        const cands = pres.filter(p => used.has(p.id) && p.canWash && free(p) && count[p.id] && !cannotDo(m.id, p.id, "wash"))
+          .sort((a, b) => (count[a.id].wash - count[b.id].wash) || (last[a.id].wash - last[b.id].wash) || a.name.localeCompare(b.name));
+        c = cands[0] || null;
+      }
+      if (!c) c = pick("wash", p => p.canWash && free(p));
+      if (c) duties.wash.push(c.id);
+    }
     m.duties = duties; tally(m, i);
   });
 }
@@ -1004,6 +1014,7 @@ function vSettings() {
     <div class="grid2"><label class="f">Standaard plekken per auto (kinderen)<input id="sf-seats" name="seatsDefault" type="number" min="1" max="8" value="${esc(s.seatsDefault)}"></label></div>
     <div class="checks"><label><input type="checkbox" name="flagAway" ${s.flagAway ? "checked" : ""}> Ook ${flagWord().toLowerCase()} bij uitwedstrijden</label>
     <label><input type="checkbox" name="washPerMatch" ${s.washPerMatch ? "checked" : ""}> Wassen na elke wedstrijd</label>
+    <label><input type="checkbox" name="washWithDuty" ${s.washWithDuty !== false ? "checked" : ""}> De wastas gaat mee met een ouder die die dag al rijdt of een andere taak heeft</label>
     <label><input type="checkbox" name="leaderDriveOne" ${s.leaderDriveOne !== false ? "checked" : ""}> Bij meerdere leiders rijdt er per uitwedstrijd één (om de beurt)</label></div>
     <h3>Keeper</h3>
     <div class="checks"><label><input type="checkbox" name="keeperFull" ${s.keeperFull !== false ? "checked" : ""}> Standaard staat de keeper de hele wedstrijd in het doel</label></div>
@@ -1263,7 +1274,7 @@ document.addEventListener("submit", e => {
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());
     if (SPORTS[fd.get("sport")]) s.sport = fd.get("sport");
     ["arriveBefore", "matchMinutes", "blocks", "onField", "seatsDefault"].forEach(k => s[k] = +fd.get(k) || s[k]);
-    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.keeperFull = fd.has("keeperFull"); s.splitLast = fd.has("splitLast"); s.leaderDriveOne = fd.has("leaderDriveOne");
+    s.flagAway = fd.has("flagAway"); s.washPerMatch = fd.has("washPerMatch"); s.washWithDuty = fd.has("washWithDuty"); s.keeperFull = fd.has("keeperFull"); s.splitLast = fd.has("splitLast"); s.leaderDriveOne = fd.has("leaderDriveOne");
     const pk = ui.clubPick; if (pk && pk.address === s.homeAddress) s.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
     else if (s.homeCoords && s.homeCoords.address !== s.homeAddress) { s.homeCoords = null; S.matches.forEach(m => { if (!m.home && m.date >= todayStr() && !m.locked) m.travel = 0; }); travelTried.clear(); }
     ui.clubPick = null; ui.clubSearch = null;
