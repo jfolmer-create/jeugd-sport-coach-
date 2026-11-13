@@ -1,3 +1,9 @@
+/* Lettertypes staan in de app zelf (geen Google Fonts): SIL Open Font License, zie fonts/OFL.txt */
+@font-face { font-family: "Barlow"; font-style: normal; font-weight: 400; font-display: swap; src: url(../fonts/barlow-latin-400-normal.woff2) format("woff2"); }
+@font-face { font-family: "Barlow"; font-style: normal; font-weight: 500; font-display: swap; src: url(../fonts/barlow-latin-500-normal.woff2) format("woff2"); }
+@font-face { font-family: "Barlow"; font-style: normal; font-weight: 600; font-display: swap; src: url(../fonts/barlow-latin-600-normal.woff2) format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-style: normal; font-weight: 600; font-display: swap; src: url(../fonts/barlow-condensed-latin-600-normal.woff2) format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-style: normal; font-weight: 700; font-display: swap; src: url(../fonts/barlow-condensed-latin-700-normal.woff2) format("woff2"); }
 /* Layout: kalkwit-op-grasmat; één kolom, sticky kop met tabbladen, kaarten per wedstrijd */
 :root {
   --bg: #f3f6f2;
@@ -131,3 +137,21 @@ button.pill.postog.home { border-color: transparent; }
 .lang { width: auto; min-height: 30px; padding: 2px 6px; font-size: 13px; background: rgba(255,255,255,.12); color: inherit; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; }
 .lang option { color: #111; }
 [dir="rtl"] .opp, [dir="rtl"] .date { letter-spacing: 0; }
+
+/* gelijktijdig wijzigen, afgelast, versies */
+.card.conflict { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad); }
+.card.cancelled { opacity: .75; }
+.card.cancelled .opp s { text-decoration-thickness: 2px; }
+.version { border-top: 1px solid var(--line); padding-top: 8px; }
+.version:first-child { border-top: 0; padding-top: 0; }
+
+/* wedstrijdmodus: groot en goed leesbaar langs het veld */
+.live { display: grid; gap: 14px; }
+.live-clock-card { text-align: center; }
+.live-clock { font-family: var(--display); font-size: clamp(64px, 22vw, 120px); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.btn.big { font-size: 18px; padding: 12px 22px; }
+.live-next { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.live-next strong { font-size: 17px; }
+.live-field { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 12px; font-size: 16px; }
+.live-field .pill { min-width: 34px; justify-content: center; }
+body.live-on nav.tabs { display: none; }

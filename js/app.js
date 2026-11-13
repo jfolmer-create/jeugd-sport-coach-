@@ -11,6 +11,10 @@ const DEFAULTS = () => ({
 let S = DEFAULTS();
 // mode: loading | local | login | newteam | cloud | shared | error
 let mode = "loading", sb = null, user = null, teams = [], teamId = null, saveTimer = null, saving = false, errorText = "";
+// opslaan: baseRev = versie van de database waar onze gegevens op voortbouwen; dirty = nog niet verstuurde wijzigingen
+let baseRev = null, dirty = false, retryN = 0, retryTimer = null, conflict = null, offline = false, schemaVersion = 0;
+const SCHEMA_NEEDED = 2;
+const hasRev = () => schemaVersion >= 2;
 // beschikbaarheidsronde: wat ouders doorgeven en welke wedstrijden open staan
 let avail = [], round = { open: false, matches: [] }, shareToken = null;
 const cannotDo = (mid, pid, what) => avail.some(a => a.match === mid && a.player === pid && (a.cannot || []).includes(what));
@@ -26,40 +30,157 @@ function normalize(x) {
     matches: Array.isArray(x.matches) ? x.matches : [], updatedAt: x.updatedAt || 0 };
 }
 function readLocal(key) { try { const raw = localStorage.getItem(key); return raw ? normalize(JSON.parse(raw)) : null; } catch (e) { return null; } }
+// Niet-verstuurde wijzigingen per team: { base: versie waarop ze voortbouwen }. Zo gaat er offline niets verloren.
+const pendKey = id => "teamplanner.pending." + id;
+function readPending(id) { try { const r = localStorage.getItem(pendKey(id)); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
+function writeLS(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v)); } catch (e) {} }
 function save() {
   if (!canEdit()) return;
   S.updatedAt = Date.now();
-  try { localStorage.setItem(cacheKey(), JSON.stringify(S)); } catch (e) {}
-  if (mode !== "cloud") return;
-  setSync("Opslaan…");
+  writeLS(cacheKey(), S);
+  if (mode !== "cloud") { autoLocalVersion(); return; }
+  if (!readPending(teamId)) writeLS(pendKey(teamId), { base: baseRev });
+  dirty = true; setSync("Opslaan…");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(pushRemote, 800);
 }
+const teamName = () => [S.settings.club, S.settings.team].filter(Boolean).join(" ") || "Mijn team";
 async function pushRemote() {
-  if (mode !== "cloud") return;
-  saving = true;
-  const name = [S.settings.club, S.settings.team].filter(Boolean).join(" ") || "Mijn team";
-  const { error } = await sb.from("teams").update({ data: S, name, updated_at: new Date().toISOString() }).eq("id", teamId);
+  clearTimeout(saveTimer); saveTimer = null;
+  if (mode !== "cloud" || !dirty || conflict) return;
+  if (saving) { saveTimer = setTimeout(pushRemote, 500); return; }
+  saving = true; dirty = false;
+  const tid = teamId, name = teamName();
+  let res;
+  try {
+    let q = sb.from("teams").update(hasRev() ? { data: S, name } : { data: S, name, updated_at: new Date().toISOString() }).eq("id", tid);
+    if (hasRev() && baseRev != null) q = q.eq("rev", baseRev);
+    res = await q.select(hasRev() ? "rev" : "id");
+  } catch (e) { res = { error: e }; }
   saving = false;
-  if (error) { setSync("Niet opgeslagen. Controleer je internet."); return; }
-  const t = teams.find(x => x.id === teamId); if (t) t.name = name;
-  setSync("Opgeslagen");
+  if (tid !== teamId) return;
+  if (res.error) { dirty = true; return scheduleRetry(); }
+  if (!res.data || !res.data.length) { dirty = true; return showConflict(); }
+  if (hasRev()) baseRev = res.data[0].rev;
+  retryN = 0; offline = false; clearTimeout(retryTimer);
+  const t = teams.find(x => x.id === tid); if (t) t.name = name;
+  if (dirty) { saveTimer = setTimeout(pushRemote, 800); return; }
+  writeLS(pendKey(tid), null); setSync("Opgeslagen");
+}
+// Geen internet of de database gaf een fout: wijzigingen blijven op dit apparaat en we proberen het later opnieuw.
+function scheduleRetry() {
+  offline = true; retryN++;
+  setSync(navigator.onLine === false ? "Offline: bewaard op dit apparaat" : "Nog niet opgeslagen, probeert opnieuw…");
+  clearTimeout(retryTimer); retryTimer = setTimeout(pushRemote, Math.min(60000, 4000 * 2 ** Math.min(retryN, 4)));
+}
+window.addEventListener("online", () => { if (mode !== "cloud") return; if (dirty) pushRemote(); else if (offline) refreshIfNewer(); });
+// Iemand anders (een mede-coach of je andere apparaat) heeft intussen opgeslagen.
+async function showConflict() {
+  const { data, error } = await sb.from("teams").select("data,rev").eq("id", teamId).single();
+  if (error) return scheduleRetry();
+  conflict = { remote: normalize(data.data), rev: data.rev };
+  setSync("Niet opgeslagen: kies een versie"); render(); window.scrollTo(0, 0);
+}
+async function resolveConflict(keepMine) {
+  if (!conflict) return;
+  const c = conflict;
+  if (keepMine) { await snapshot("versie van de ander, bij gelijktijdig wijzigen", c.remote); baseRev = c.rev; conflict = null; dirty = true; render(); pushRemote(); }
+  else { await snapshot("jouw versie, bij gelijktijdig wijzigen", S); S = c.remote; baseRev = c.rev; conflict = null; dirty = false;
+    writeLS(cacheKey(), S); writeLS(pendKey(teamId), null); setSync("Opgeslagen"); render(); }
+  toast(keepMine ? "Jouw versie is opgeslagen. De andere staat bij Eerdere versies." : "De andere versie staat nu hier. Die van jou staat bij Eerdere versies.");
+}
+function conflictCard() {
+  if (!conflict) return "";
+  return `<div class="card conflict"><h3>Iemand anders heeft ook iets gewijzigd</h3>
+    <p class="small">Terwijl jij bezig was, is dit team op een ander apparaat of door een mede-coach opgeslagen. Je wijzigingen zijn nog niet opgeslagen. Kies welke versie je houdt; de andere bewaart de app bij Instellingen → Eerdere versies.</p>
+    <div class="row"><button class="btn primary" data-act="conflictmine">Mijn versie houden</button><button class="btn" data-act="conflicttheirs">Hun versie gebruiken</button></div></div>`;
+}
+async function refreshIfNewer() {
+  if (mode !== "cloud" || saving || dirty || conflict || !teamId) return;
+  try {
+    if (hasRev()) {
+      const { data, error } = await sb.from("teams").select("rev").eq("id", teamId).single();
+      if (error) return; offline = false;
+      if (data.rev === baseRev) { setSync("Opgeslagen"); return; }
+      const r = await sb.from("teams").select("data,rev").eq("id", teamId).single();
+      if (r.error || dirty) return;
+      S = normalize(r.data.data); baseRev = r.data.rev; writeLS(cacheKey(), S); render(); setSync("Opgeslagen"); toast("Bijgewerkt met de laatste wijzigingen.");
+    } else {
+      const { data } = await sb.from("teams").select("data").eq("id", teamId).single();
+      if (data && data.data && (data.data.updatedAt || 0) > (S.updatedAt || 0)) { S = normalize(data.data); render(); toast("Bijgewerkt met de laatste wijzigingen."); }
+    }
+  } catch (e) {}
+}
+// ---------- eerdere versies ----------
+// Online bewaart de database zelf elk uur een versie; daarnaast bewaren we er een vóór elke grote stap.
+async function snapshot(reason, data) {
+  data = data || S;
+  if (mode === "cloud") {
+    if (!hasRev()) return;
+    try { await sb.from("team_versions").insert({ team_id: teamId, data, reason }); } catch (e) {}
+    return;
+  }
+  if (mode !== "local") return;
+  let list = []; try { list = JSON.parse(localStorage.getItem("teamplanner.versions") || "[]"); } catch (e) {}
+  list.unshift({ at: Date.now(), reason, data }); writeLS("teamplanner.versions", list.slice(0, 15));
+}
+function autoLocalVersion() {
+  let list = []; try { list = JSON.parse(localStorage.getItem("teamplanner.versions") || "[]"); } catch (e) {}
+  if (!list.length || Date.now() - list[0].at > 3600e3) snapshot("automatisch");
+}
+async function loadVersions() {
+  ui.versions = { loading: true }; render();
+  if (mode === "cloud") {
+    const { data, error } = await sb.from("team_versions").select("id,reason,created_at").eq("team_id", teamId).order("created_at", { ascending: false }).limit(40);
+    ui.versions = error ? { error: "Versies ophalen lukte niet." } : { list: (data || []).map(v => ({ id: v.id, at: Date.parse(v.created_at), reason: v.reason })) };
+  } else {
+    let list = []; try { list = JSON.parse(localStorage.getItem("teamplanner.versions") || "[]"); } catch (e) {}
+    ui.versions = { list: list.map((v, i) => ({ id: i, at: v.at, reason: v.reason })) };
+  }
+  render();
+}
+async function restoreVersion(id) {
+  let data = null;
+  if (mode === "cloud") { const r = await sb.from("team_versions").select("data").eq("id", id).single(); if (r.error) { toast("Terugzetten lukte niet."); return; } data = r.data.data; }
+  else { try { data = JSON.parse(localStorage.getItem("teamplanner.versions") || "[]")[+id].data; } catch (e) {} }
+  if (!data) { toast("Die versie is er niet meer."); return; }
+  await snapshot("vóór terugzetten");
+  S = normalize(data); save(); ui.versions = null; render(); toast("Versie teruggezet. De versie van vlak daarvoor staat ook in de lijst.");
+}
+function versionsCard() {
+  if (mode === "cloud" && !hasRev()) return "";
+  const v = ui.versions; const when = at => new Date(at).toLocaleString("nl-NL", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return `<div class="card"><h3>Eerdere versies</h3>
+    <p class="small muted">De app bewaart automatisch elk uur een versie, en altijd vlak vóór grote stappen zoals alles wissen, een back-up terugzetten of een nieuw seizoen. Iets per ongeluk kwijt? Zet hier een eerdere versie terug.</p>
+    ${!v ? `<div class="row"><button class="btn" data-act="versions">Toon eerdere versies</button></div>`
+      : v.loading ? `<p class="small muted">Laden…</p>` : v.error ? `<div class="notice">${esc(v.error)}</div>`
+      : v.list.length ? `<div class="stack">${v.list.map(x => `<div class="row between version"><span>${esc(when(x.at))} <span class="muted small">${esc(x.reason || "")}</span></span>
+        <button class="btn ${ui.arm === "ver" + x.id ? "arm" : "ghost"}" data-act="restorever" data-id="${x.id}">${ui.arm === "ver" + x.id ? "Zeker? Tik nogmaals" : "Terugzetten"}</button></div>`).join("")}</div>`
+      : `<p class="small muted">Nog geen eerdere versies.</p>`}
+  </div>`;
 }
 function setSync(t) { const el = document.getElementById("sync"); if (el) el.textContent = t; }
 
 async function init() {
   const params = new URLSearchParams(location.search);
   const token = params.get("kijk"); shareToken = token;
+  // Uitnodiging als mede-coach: bewaren tot na het inloggen (de inloglink komt terug zonder ?uitnodiging=).
+  const inv = params.get("uitnodiging");
+  if (inv) { writeLS("teamplanner.invite", inv); history.replaceState(null, "", location.pathname); }
   const cfg = window.TEAMPLANNER_CONFIG || {};
   if (cfg.supabaseUrl && cfg.supabaseAnonKey && window.supabase && window.supabase.createClient) {
     sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
   }
   if (token) {
     if (!sb) { mode = "error"; errorText = "Deze kijklink werkt alleen op de online versie van de planner."; return render(); }
-    const { data, error } = await sb.rpc("get_shared_team", { token });
-    const row = Array.isArray(data) ? data[0] : data;
-    if (error || !row) { mode = "error"; errorText = "Deze kijklink werkt niet (meer). Vraag de coach om een nieuwe link."; return render(); }
-    S = normalize(row.data); avail = row.availability || []; round = { open: !!row.avail_open, matches: row.avail_matches || [] }; mode = "shared"; ui.tab = "planning"; render(); setSync("Alleen bekijken");
+    let data = null, error = null;
+    try { ({ data, error } = await sb.rpc("get_shared_team", { token })); } catch (e) { error = e; }
+    let row = Array.isArray(data) ? data[0] : data;
+    // Offline: laat de laatst bekeken versie zien.
+    if (error && !row) { try { row = JSON.parse(localStorage.getItem("teamplanner.shared." + token)); } catch (e) {} if (row) offline = true; }
+    else if (row) writeLS("teamplanner.shared." + token, row);
+    if (!row) { mode = "error"; errorText = error ? "Geen verbinding. Probeer het opnieuw als je internet hebt." : "Deze kijklink werkt niet (meer). Vraag de coach om een nieuwe link."; return render(); }
+    S = normalize(row.data); avail = row.availability || []; round = { open: !!row.avail_open, matches: row.avail_matches || [] }; mode = "shared"; ui.tab = "planning"; render(); setSync(offline ? "Offline: laatst bekeken versie" : "Alleen bekijken");
     return;
   }
   if (!sb) { S = readLocal(LS_KEY) || DEFAULTS(); mode = "local"; render(); setSync("Op dit apparaat"); return; }
@@ -72,24 +193,59 @@ async function init() {
   if (data && data.session) { if (!user) { user = data.session.user; await loadTeams(); } }
   else if (!user) { mode = "login"; render(); }
 }
+async function checkSchema() {
+  try { const { data, error } = await sb.rpc("teamplanner_schema"); if (!error) { schemaVersion = +data || 1; writeLS("teamplanner.schema", String(schemaVersion)); return; }
+    if (error && /fetch|network/i.test(error.message || "")) throw error; schemaVersion = 1; }
+  catch (e) { schemaVersion = +(localStorage.getItem("teamplanner.schema") || 1); }
+}
+async function acceptInvite() {
+  let tok = null; try { tok = localStorage.getItem("teamplanner.invite"); } catch (e) {}
+  if (!tok || !hasRev()) return null;
+  writeLS("teamplanner.invite", null);
+  const { data, error } = await sb.rpc("accept_invite", { p_token: tok });
+  if (error || !data) { toast("Deze uitnodiging werkt niet (meer). Vraag om een nieuwe link."); return null; }
+  toast("Je bent nu coach van dit team."); return data;
+}
 async function loadTeams() {
-  const { data, error } = await sb.from("teams").select("id,name,share_token,updated_at,avail_open,avail_matches").order("created_at");
-  if (error) { mode = "error"; errorText = "Kan je teams niet laden: " + error.message; return render(); }
+  await checkSchema();
+  const joined = await acceptInvite();
+  let data = null, error = null;
+  try { ({ data, error } = await sb.from("teams").select(hasRev() ? "id,name,share_token,updated_at,avail_open,avail_matches,owner" : "id,name,share_token,updated_at,avail_open,avail_matches").order("created_at")); } catch (e) { error = e; }
+  if (error) {
+    // Geen verbinding: werk verder met wat er op dit apparaat staat.
+    let cached = null; try { cached = JSON.parse(localStorage.getItem("teamplanner.teams." + user.id)); } catch (e) {}
+    if (!cached || !cached.length) { mode = "error"; errorText = "Kan je teams niet laden: " + (error.message || "geen verbinding"); return render(); }
+    data = cached; offline = true;
+  } else writeLS("teamplanner.teams." + user.id, data || []);
   teams = data || [];
+  if (joined && teams.find(t => t.id === joined)) writeLS("teamplanner.team", joined);
   if (!teams.length) { mode = "newteam"; return render(); }
   let pick = null; try { pick = localStorage.getItem("teamplanner.team"); } catch (e) {}
   await loadTeam(teams.find(t => t.id === pick) ? pick : teams[0].id);
 }
 async function loadTeam(id) {
+  if (dirty && mode === "cloud") await pushRemote();
+  clearTimeout(retryTimer); conflict = null; ui.people = null; ui.versions = null; ui.invite = null;
   mode = "loading"; render();
-  const { data, error } = await sb.from("teams").select("data").eq("id", id).single();
-  if (error) { mode = "error"; errorText = "Kan dit team niet laden: " + error.message; return render(); }
-  teamId = id; S = normalize(data.data); mode = "cloud";
+  let data = null, error = null;
+  try { ({ data, error } = await sb.from("teams").select(hasRev() ? "data,rev" : "data").eq("id", id).single()); } catch (e) { error = e; }
+  const cached = readLocal(LS_KEY + "." + id), pend = readPending(id);
+  if (error) {
+    if (!cached) { mode = "error"; errorText = "Kan dit team niet laden: " + (error.message || "geen verbinding"); return render(); }
+    teamId = id; S = cached; mode = "cloud"; offline = true; baseRev = pend ? pend.base : null; dirty = !!pend;
+    if (dirty) scheduleRetry();
+  } else {
+    teamId = id; mode = "cloud"; offline = false;
+    if (pend && cached) {
+      // Er stonden nog wijzigingen op dit apparaat die nooit zijn aangekomen: nu alsnog versturen (bij een botsing vraagt de app wat je wilt).
+      S = cached; baseRev = hasRev() ? pend.base : null; dirty = true; setTimeout(pushRemote, 50);
+    } else { S = normalize(data.data); baseRev = hasRev() ? data.rev : null; dirty = false; writeLS(LS_KEY + "." + id, S); }
+  }
   const t = teams.find(x => x.id === id) || {}; round = { open: !!t.avail_open, matches: t.avail_matches || [] };
-  await loadAvail();
+  if (!offline) await loadAvail();
   try { localStorage.setItem("teamplanner.team", id); } catch (e) {}
-  ui.editMatch = ui.editPlayer = ui.lineupMatch = null;
-  render(); setSync("Opgeslagen");
+  ui.editMatch = ui.editPlayer = ui.lineupMatch = null; ui.live = null;
+  render(); setSync(offline ? "Offline: bewaard op dit apparaat" : dirty ? "Opslaan…" : "Opgeslagen");
 }
 async function loadAvail() {
   if (mode !== "cloud") return;
@@ -103,7 +259,7 @@ async function setRound(open, matches) {
   return true;
 }
 async function closeRound() {
-  await loadAvail();
+  await loadAvail(); await snapshot("vóór sluiten beschikbaarheidsronde");
   if (!await setRound(false, round.matches)) return;
   const ids = round.matches;
   S.matches.filter(m => ids.includes(m.id)).forEach(m => {
@@ -124,7 +280,7 @@ function roundText() {
 }
 function roundCard() {
   if (mode !== "cloud") return "";
-  const up = sorted().filter(m => m.date >= todayStr());
+  const up = sorted().filter(m => m.date >= todayStr() && !m.cancelled);
   if (round.open) {
     const fam = S.players; const done = fam.filter(p => avail.some(a => a.player === p.id && round.matches.includes(a.match)));
     const todo = fam.filter(p => !done.includes(p));
@@ -212,7 +368,7 @@ async function createTeam(fd) {
   if (club) data.settings.club = club; if (team) data.settings.team = team; if (address) data.settings.homeAddress = address;
   const age = +((team.match(/(?:JO|MO|O)\s?(\d{1,2})/i) || [])[1] || 0);
   const sp = SPORTS[fd.get("sport")] ? fd.get("sport") : "voetbal"; data.settings.sport = sp;
-  const pre = !fromLocal && age ? (sp === "hockey" ? (age <= 10 ? 0 : age <= 12 ? 1 : age <= 14 ? 2 : 3) : (age <= 9 ? 0 : age <= 11 ? 1 : age === 13 ? 2 : age <= 15 && age >= 14 ? 3 : age <= 17 && age >= 16 ? 4 : age >= 18 ? 5 : -1)) : -1;
+  const pre = !fromLocal && age ? (sp === "hockey" ? (age <= 10 ? 0 : age <= 12 ? 1 : age <= 14 ? 2 : 3) : (age <= 9 ? 0 : age <= 12 ? 1 : age === 13 ? 2 : age <= 15 && age >= 14 ? 3 : age <= 17 && age >= 16 ? 4 : age >= 18 ? 5 : -1)) : -1;
   if (pre >= 0) { const P = presetsFor(sp)[pre]; Object.assign(data.settings, { onField: P[1], matchMinutes: P[2], blocks: P[3], formation: P[4] }); }
   const pk = ui.clubPick; if (pk && pk.address === data.settings.homeAddress) data.settings.homeCoords = { lat: pk.lat, lon: pk.lon, address: pk.address, label: pk.name };
   ui.clubPick = null; ui.clubSearch = null;
@@ -228,10 +384,9 @@ async function newShareLink() {
   teams.find(t => t.id === teamId).share_token = tok; render(); toast("Nieuwe kijklink gemaakt. De oude werkt niet meer.");
 }
 const shareUrl = () => { const t = teams.find(x => x.id === teamId); return t ? location.origin + location.pathname + "?kijk=" + t.share_token : ""; };
-document.addEventListener("visibilitychange", async () => {
-  if (document.visibilityState !== "visible" || mode !== "cloud" || saving || saveTimer && S.updatedAt > Date.now() - 1500) return;
-  const { data } = await sb.from("teams").select("data").eq("id", teamId).single();
-  if (data && data.data && (data.data.updatedAt || 0) > (S.updatedAt || 0)) { S = normalize(data.data); render(); toast("Bijgewerkt met de laatste wijzigingen."); }
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || mode !== "cloud") return;
+  if (dirty) pushRemote(); else refreshIfNewer();
 });
 
 // ---------- helpers ----------
@@ -498,6 +653,7 @@ function planDuties(onlyFuture = true) {
     ["flag", "wash"].forEach(k => (d[k] || []).forEach(id => { if (count[id]) { count[id][k]++; last[id][k] = i; } }));
   };
   list.forEach((m, i) => {
+    if (m.cancelled) { m.duties = null; return; }
     if (m.locked || (onlyFuture && m.date < today)) { tally(m, i); return; }
     const pres = present(m).filter(p => !cannotDo(m.id, p.id, "absent")); const used = new Set(); const duties = { drive: [], flag: [], wash: [] };
     // Eén taak per gezin per wedstrijd; alleen gezinnen met "twee ouders helpen" kunnen er twee krijgen.
@@ -541,6 +697,7 @@ function planDuties(onlyFuture = true) {
   });
 }
 function dutyIssues(m) {
+  if (m.cancelled) return [];
   const out = []; const d = m.duties || {}; const n = present(m).length;
   if (!m.home) {
     const cap = (d.drive || []).reduce((s, id) => s + (+((pById(id) || {}).seats) || +S.settings.seatsDefault || 3), 0);
@@ -579,14 +736,15 @@ function lineupDurs(m) {
 }
 function lineupMinutes(m, pid) {
   if (!m.lineup || !m.lineup.cells || !m.lineup.cells[pid]) return 0;
-  const d = lineupDurs(m); return m.lineup.cells[pid].reduce((t, c, i) => t + (c && c !== "-" ? d[i] || 0 : 0), 0);
+  const d = lineupDurs(m); return Math.max(0, m.lineup.cells[pid].reduce((t, c, i) => t + (c && c !== "-" ? d[i] || 0 : 0), 0) + ((m.lineup.adj || {})[pid] || 0));
 }
 function seasonStats(beforeMatch) {
   const st = {}; S.players.forEach(p => st[p.id] = { min: 0, keeper: 0, games: 0, avail: 0 });
   sorted().forEach(m => {
-    if (!m.lineup) return;
+    if (!m.lineup || m.cancelled) return;
+    // Voor het plannen tellen ook eerdere, al geplande schema's mee. Voor het seizoensoverzicht: gespeeld, of de datum is voorbij.
     if (beforeMatch) { if (m.id === beforeMatch.id || byDate(m, beforeMatch) >= 0) return; }
-    else if (!m.played) return;
+    else if (!counts(m)) return;
     Object.keys(m.lineup.cells || {}).forEach(pid => {
       if (!st[pid]) return; const min = lineupMinutes(m, pid);
       st[pid].min += min; st[pid].avail += (+m.lineup.matchMinutes || 60); if (min > 0) st[pid].games++;
@@ -595,24 +753,31 @@ function seasonStats(beforeMatch) {
   });
   return st;
 }
+const counts = m => !!m.lineup && !m.cancelled && (m.played || isPast(m));
 const useReserve = m => m.useReserve ?? (S.settings.keeperFull === false);
-function planLineup(m) {
-  const pres = present(m); const B = Math.max(1, +S.settings.blocks || 4); const onField = Math.max(1, +S.settings.onField || 8);
+// Maak het wisselschema. Met opts.from > 0 blijven de blokken daarvoor staan en wordt alleen de rest opnieuw ingedeeld
+// (tijdens de wedstrijd: bij een blessure of een speler die later komt). opts.exclude = spelers die niet meer kunnen spelen.
+function planLineup(m, opts = {}) {
+  const old = opts.from > 0 && m.lineup ? m.lineup : null; const from = old ? opts.from : 0;
+  const out = new Set(old ? (opts.exclude || old.out || []) : []);
+  const pres = present(m); const avail = pres.filter(p => !out.has(p.id));
+  const B = Math.max(1, +S.settings.blocks || 4); const onField = Math.max(1, +S.settings.onField || 8);
   const bm = blockMin(); const season = seasonStats(m); const slots = slotsFor();
   // Komt de bank niet eerlijk uit (sommigen zouden twee blokken zitten), dan halveren we het laatste blok:
   // dan zitten er een paar spelers een half blok extra in plaats van twee spelers een heel blok.
   const benchN = Math.max(0, pres.length - onField), fieldN = Math.max(1, pres.length - 1);
   const split = S.settings.splitLast !== false && B >= 2 && benchN > 0 && (B * benchN) % fieldN !== 0;
-  const durs = split ? Array(B - 1).fill(bm).concat([bm / 2, bm / 2]) : Array(B).fill(bm);
-  const C = durs.length; const base = c => Math.min(c, B - 1);
-  const cells = {}; pres.forEach(p => cells[p.id] = Array(C).fill("-"));
-  const planned = id => season[id].min + cells[id].reduce((t, c, i) => t + (c !== "-" ? durs[i] : 0), 0);
-  const half = Math.ceil(B / 2); const keepers = [];
+  const durs = old ? lineupDurs(m) : split ? Array(B - 1).fill(bm).concat([bm / 2, bm / 2]) : Array(B).fill(bm);
+  const C = durs.length; const Bn = old ? (C > B ? B : C) : B; const base = c => Math.min(c, Bn - 1);
+  const adj = old ? Object.assign({}, old.adj || {}) : {};
+  const cells = {}; pres.forEach(p => cells[p.id] = old && old.cells[p.id] ? old.cells[p.id].slice(0, from).concat(Array(C - from).fill("-")) : Array(C).fill("-"));
+  const planned = id => season[id].min + (adj[id] || 0) + cells[id].reduce((t, c, i) => t + (c !== "-" ? durs[i] : 0), 0);
+  const half = Math.ceil(Bn / 2); const keepers = [];
   const order = (a, b) => planned(a.id) - planned(b.id) || season[a.id].min - season[b.id].min || a.name.localeCompare(b.name);
   // Keeper eerst, dan reservekeeper, dan wie het minst gespeeld heeft.
   const has = (p, k) => (p.positions || []).includes(k);
   const pickKeeper = exclude => {
-    const tiers = [pres.filter(p => has(p, "K")), pres.filter(p => has(p, "R")), pres];
+    const tiers = [avail.filter(p => has(p, "K")), avail.filter(p => has(p, "R")), avail];
     for (const tier of tiers) {
       const pool = tier.filter(p => !exclude.includes(p.id));
       if (pool.length) return pool.sort((a, b) => season[a.id].keeper - season[b.id].keeper || order(a, b))[0].id;
@@ -622,22 +787,30 @@ function planLineup(m) {
   // Keeper wisselt alleen in de rust. Per wedstrijd kies je of de reservekeeper de tweede helft keept.
   // Wie niet getraind heeft, begint op de bank; geldt ook voor de keeper als er een (reserve)keeper is die wel trainde.
   const missed = id => (m.missedTraining || []).includes(id);
-  const best = pickKeeper([]);
-  const trained = pres.filter(p => (has(p, "K") || has(p, "R")) && !missed(p.id))
-    .sort((a, b) => (has(b, "K") - has(a, "K")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
-  keepers[0] = keepers[1] = best;
-  if (best && missed(best) && trained) { keepers[0] = trained.id; keepers[1] = best; }
-  else if (useReserve(m)) {
-    const others = pres.filter(p => p.id !== keepers[0]);
-    const r = others.filter(p => has(p, "R")).concat(others.filter(p => has(p, "K")))
-      .sort((a, b) => (has(b, "R") - has(a, "R")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
-    if (r) keepers[1] = r.id;
+  if (old) {
+    // Houd de keepers van het bestaande schema aan, behalve wie niet meer kan.
+    const oldK = b => Object.keys(old.cells).find(id => old.cells[id][b] === "K");
+    const k0 = oldK(Math.max(0, from - 1)); const sub = !k0 || out.has(k0) ? pickKeeper([]) : k0;
+    for (let b = 0; b < C; b++) { const k = oldK(b); keepers[b] = b < from ? k : (k && !out.has(k) && cells[k] ? k : sub); }
+  } else {
+    const best = pickKeeper([]);
+    const trained = avail.filter(p => (has(p, "K") || has(p, "R")) && !missed(p.id))
+      .sort((a, b) => (has(b, "K") - has(a, "K")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
+    let k1 = best, k2 = best;
+    if (best && missed(best) && trained) { k1 = trained.id; k2 = best; }
+    else if (useReserve(m)) {
+      const others = avail.filter(p => p.id !== k1);
+      const r = others.filter(p => has(p, "R")).concat(others.filter(p => has(p, "K")))
+        .sort((a, b) => (has(b, "R") - has(a, "R")) || season[a.id].keeper - season[b.id].keeper || order(a, b))[0];
+      if (r) k2 = r.id;
+    }
+    for (let b = 0; b < C; b++) keepers[b] = Math.floor(base(b) / half) >= 1 ? k2 : k1;
   }
-  for (let b = 0; b < C; b++) {
-    const k = keepers[Math.min(1, Math.floor(base(b) / half))];
+  for (let b = from; b < C; b++) {
+    const k = keepers[b];
     if (k) cells[k][b] = "K";
     const satLast = id => b > 0 && cells[id][b - 1] === "-";
-    const cands = pres.filter(p => p.id !== k).sort((x, y) =>
+    const cands = avail.filter(p => p.id !== k).sort((x, y) =>
       (b === 0 ? missed(x.id) - missed(y.id) : 0) || (planned(x.id) - planned(y.id)) || (satLast(y.id) - satLast(x.id)) || order(x, y));
     const chosen = cands.slice(0, onField - (k ? 1 : 0));
     const free = slots.slice(); const left = [];
@@ -660,7 +833,116 @@ function planLineup(m) {
     });
     left.forEach(p => { cells[p.id][b] = free.length ? free.shift() : "CM"; });
   }
-  m.lineup = { cells, durs, matchMinutes: +S.settings.matchMinutes || 60, created: Date.now() };
+  m.lineup = { cells, durs, matchMinutes: old ? old.matchMinutes : +S.settings.matchMinutes || 60, created: old ? old.created : Date.now(), adj, out: [...out] };
+}
+
+// ---------- wedstrijdmodus (langs het veld) ----------
+// m.live = { acc: gespeelde ms, since: starttijd als de klok loopt, halfDone, swaps: [{ b, out, in, t }] }
+const liveOf = m => (m.live = m.live || { acc: 0, since: null, halfDone: false, swaps: [] });
+const liveMs = m => { const L = liveOf(m); return L.acc + (L.since ? Date.now() - L.since : 0); };
+const liveTotal = m => lineupDurs(m).reduce((a, x) => a + x, 0);
+function liveBlock(m, min) {
+  const d = lineupDurs(m); let at = 0;
+  for (let b = 0; b < d.length; b++) { if (min < at + d[b] - 1e-9) return { b, start: at, end: at + d[b] }; at += d[b]; }
+  return { b: d.length, start: at, end: at };
+}
+// Wie staat er in blok b in het veld (met de wissels die tijdens dat blok anders gingen dan gepland)?
+function fieldAt(m, b, withSwaps = true) {
+  const f = {}; Object.entries(m.lineup.cells).forEach(([id, r]) => { if (r[b] && r[b] !== "-") f[id] = r[b]; });
+  if (withSwaps) (liveOf(m).swaps || []).filter(x => x.b === b).forEach(x => { const pos = f[x.out]; if (pos) { delete f[x.out]; f[x.in] = pos; } });
+  return f;
+}
+const clockText = ms => { const sec = Math.max(0, Math.floor(ms / 1000)); return String(Math.floor(sec / 60)).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0"); };
+let audio = null, wakeLock = null, liveTimer = null;
+function beep() {
+  try { navigator.vibrate && navigator.vibrate([300, 120, 300]); } catch (e) {}
+  try { if (!audio) return; const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = 880; o.connect(g); g.connect(audio.destination);
+    g.gain.setValueAtTime(0.25, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.6); o.start(); o.stop(audio.currentTime + 0.6); } catch (e) {}
+}
+async function keepAwake(on) {
+  try { if (on && !wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => wakeLock = null); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; } } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && ui.live) { const m = S.matches.find(x => x.id === ui.live); if (m && liveOf(m).since) keepAwake(true); } });
+function liveTick() {
+  const m = ui.live && S.matches.find(x => x.id === ui.live && x.lineup);
+  if (!m || mode === "shared") { clearInterval(liveTimer); liveTimer = null; return; }
+  const L = liveOf(m); const total = liveTotal(m);
+  let min = liveMs(m) / 60000;
+  if (L.since && !L.halfDone && min >= total / 2) { L.acc = total / 2 * 60000; L.since = null; L.halfDone = true; save(); beep(); keepAwake(false); render(); toast("Rust! Tik op Start voor de tweede helft."); return; }
+  if (L.since && min >= total) { L.acc = total * 60000; L.since = null; save(); beep(); keepAwake(false); render(); toast("Speeltijd voorbij. Tik op Wedstrijd afgelopen als het klaar is."); return; }
+  const blk = liveBlock(m, min);
+  if (ui.liveBlock != null && blk.b !== ui.liveBlock) { ui.liveBlock = blk.b; if (L.since) beep(); render(); return; }
+  ui.liveBlock = blk.b;
+  const c = document.getElementById("live-clock"); if (c) c.textContent = clockText(liveMs(m));
+  const n = document.getElementById("live-next"); if (n) n.textContent = blk.b < lineupDurs(m).length - 1 ? "over " + clockText((blk.end - min) * 60000) : "";
+}
+function startLiveTimer() { if (!liveTimer) liveTimer = setInterval(liveTick, 1000); }
+function liveSwap(m, outId, inId) {
+  const min = liveMs(m) / 60000; const blk = liveBlock(m, min); if (blk.b >= lineupDurs(m).length) return false;
+  const left = blk.end - min; const adj = m.lineup.adj = m.lineup.adj || {};
+  adj[outId] = (adj[outId] || 0) - left; adj[inId] = (adj[inId] || 0) + left;
+  liveOf(m).swaps.push({ b: blk.b, out: outId, in: inId, t: Math.round(min * 10) / 10 });
+  return true;
+}
+function liveInjured(m, pid) {
+  const min = liveMs(m) / 60000; const blk = liveBlock(m, min); const C = lineupDurs(m).length;
+  const f = fieldAt(m, blk.b);
+  if (f[pid] && blk.b < C) {
+    const out = new Set(m.lineup.out || []); out.add(pid);
+    const bench = present(m).filter(p => !f[p.id] && !out.has(p.id)).sort((a, b) => lineupMinutes(m, a.id) - lineupMinutes(m, b.id));
+    if (bench.length) liveSwap(m, pid, bench[0].id);
+    else { const adj = m.lineup.adj = m.lineup.adj || {}; adj[pid] = (adj[pid] || 0) - (blk.end - min); }
+  }
+  const ex = [...new Set([...(m.lineup.out || []), pid])];
+  if (blk.b + 1 < C) planLineup(m, { from: blk.b + 1, exclude: ex }); else m.lineup.out = ex;
+}
+function liveLate(m, pid) {
+  m.absent = (m.absent || []).filter(x => x !== pid);
+  const blk = liveBlock(m, liveMs(m) / 60000); const C = lineupDurs(m).length;
+  if (blk.b + 1 < C) planLineup(m, { from: blk.b + 1, exclude: m.lineup.out || [] });
+  else m.lineup.cells[pid] = m.lineup.cells[pid] || Array(C).fill("-");
+}
+function vLive(m) {
+  const L = liveOf(m); const d = lineupDurs(m); const C = d.length; const total = liveTotal(m);
+  const min = liveMs(m) / 60000; const blk = liveBlock(m, min); ui.liveBlock = blk.b; startLiveTimer();
+  const f = blk.b < C ? fieldAt(m, blk.b) : {}; const outSet = new Set(m.lineup.out || []);
+  const onIds = Object.keys(f).sort((a, b) => POS_ORDER.indexOf(f[a]) - POS_ORDER.indexOf(f[b]) || pName(a).localeCompare(pName(b)));
+  const bench = present(m).filter(p => !f[p.id]).sort((a, b) => a.name.localeCompare(b.name));
+  let next = "";
+  if (blk.b < C - 1) {
+    const nf = fieldAt(m, blk.b + 1, false); const ins = Object.keys(nf).filter(id => !f[id]), outs = Object.keys(f).filter(id => !nf[id]);
+    next = `<div class="card live-next"><h3>Volgende wissel <span class="muted" id="live-next">over ${clockText((blk.end - min) * 60000)}</span></h3>
+      ${ins.length || outs.length ? `<div class="duty"><span>Erin</span><div><strong>${ins.map(id => esc(pName(id)) + ` <span class="muted small">${esc(nf[id])}</span>`).join(", ") || "–"}</strong></div></div>
+      <div class="duty"><span>Eruit</span><div>${outs.map(id => esc(pName(id))).join(", ") || "–"}</div></div>` : `<p class="small muted">Geen wissels, alleen eventueel andere posities.</p>`}</div>`;
+  }
+  const running = !!L.since; const ended = min >= total - 1e-9;
+  const half = L.halfDone ? "2e helft" : "1e helft";
+  const opt = list => list.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  const onPlayers = onIds.map(pById).filter(Boolean);
+  const absentKids = S.players.filter(p => (m.absent || []).includes(p.id));
+  return `<div class="live">
+    <div class="row between"><button class="btn ghost" data-act="liveexit">← Terug</button><span class="date">${esc(fmtDate(m.date))} · ${m.home ? "thuis" : "uit"} · ${esc(m.opponent)}</span></div>
+    <div class="card live-clock-card"><div class="live-clock" id="live-clock">${clockText(liveMs(m))}</div>
+      <p class="small muted">${ended ? "Speeltijd voorbij" : half + " · blok " + Math.min(C, blk.b + 1) + " van " + C}${L.swaps.length ? " · " + L.swaps.length + " wissel(s) anders dan gepland" : ""}</p>
+      <div class="row" style="justify-content:center">${ended ? "" : `<button class="btn primary big" data-act="liveclock">${running ? "Pauze" : min > 0 ? (L.halfDone && Math.abs(min - total / 2) < 0.02 ? "Start 2e helft" : "Verder") : "Start wedstrijd"}</button>`}
+      <button class="btn ${ui.arm === "liveend" ? "arm" : ""}" data-act="liveend">${ui.arm === "liveend" ? "Zeker? Minuten tellen dan mee" : "Wedstrijd afgelopen"}</button></div></div>
+    ${next}
+    <div class="card"><h3>In het veld</h3><div class="live-field">${onIds.map(id => `<div><span class="pill cell-${lineOf(f[id])}">${esc(f[id])}</span> ${esc(pName(id))}</div>`).join("") || '<p class="small muted">–</p>'}</div></div>
+    <div class="card"><h3>Bank</h3><p>${bench.map(p => esc(p.name) + (outSet.has(p.id) ? ' <span class="pill warn">kan niet verder</span>' : "")).join(", ") || '<span class="muted small">niemand</span>'}</p></div>
+    ${ended ? "" : `<details class="card"><summary>Nu anders wisselen</summary>
+      <div class="grid2"><label class="f">Eruit<select id="lv-out">${opt(onPlayers)}</select></label><label class="f">Erin<select id="lv-in">${opt(bench.filter(p => !outSet.has(p.id)))}</select></label></div>
+      <div class="row"><button class="btn" data-act="liveswap">Wissel nu</button></div>
+      <p class="small muted">De minuten tellen mee zoals het echt ging. Het volgende blok gaat weer volgens het schema.</p></details>
+    <details class="card"><summary>Blessure of moet weg</summary>
+      <label class="f">Speler<select id="lv-inj">${opt(onPlayers.concat(bench.filter(p => !outSet.has(p.id))))}</select></label>
+      <div class="row"><button class="btn" data-act="liveinj">Kan niet verder spelen</button></div>
+      <p class="small muted">Staat de speler in het veld, dan komt degene van de bank met de minste minuten erin. De rest van het schema wordt opnieuw verdeeld.</p></details>
+    ${absentKids.length ? `<details class="card"><summary>Speler komt later</summary>
+      <label class="f">Speler<select id="lv-late">${opt(absentKids)}</select></label>
+      <div class="row"><button class="btn" data-act="livelate">Is er nu, doet mee</button></div>
+      <p class="small muted">De speler doet mee vanaf het volgende blok; de rest van het schema wordt opnieuw verdeeld.</p></details>` : ""}`}
+  </div>`;
 }
 
 // ---------- WhatsApp text ----------
@@ -675,7 +957,10 @@ function matchText(m) {
   const day = (() => { try { return new Date(m.date + "T12:00").toLocaleDateString(window.I18N ? I18N.locale : "nl-NL", { weekday: "long", day: "numeric", month: "long" }); } catch (e) { return m.date; } })();
   const names = ids => ids.map(pName).join(" & "); const pl = ids => joinParents(ids);
   const L = [];
-  const ball = isHockey() ? "🏑" : "⚽"; L.push(ball + " *" + t("Wedstrijd {day}", { day }) + "* " + ball);
+  const ball = isHockey() ? "🏑" : "⚽";
+  if (m.cancelled) return "❌ *" + t("Afgelast:") + "* " + day + ", " + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "\n" + t("Er hoeft niemand te rijden, te vlaggen of te wassen.");
+  L.push(ball + " *" + t("Wedstrijd {day}", { day }) + "* " + ball);
+  if (m.moved) L.push("📅 " + t("Let op: deze wedstrijd is verplaatst."));
   L.push("");
   L.push("🏟️ *" + (m.home ? own + " – " + (m.opponent || "?") : (m.opponent || "?") + " – " + own) + "*" + " " + (m.home ? t("(thuis)") : t("(uit)")));
   if (!m.home) {
@@ -712,18 +997,27 @@ function render() {
   const st = { el: document.activeElement && document.activeElement.id };
   if (!inTeam) { main.innerHTML = ({ loading: vLoading, login: vLogin, newteam: vNewTeam, error: vError }[mode] || vLoading)(); return; }
   if (mode === "shared") ui.tab = "planning";
-  main.innerHTML = ({ planning: vPlanning, matches: vMatches, players: vPlayers, lineup: vLineup, season: vSeason, settings: vSettings }[ui.tab] || vPlanning)();
+  const live = ui.live && canEdit() && S.matches.find(x => x.id === ui.live && x.lineup);
+  document.body.classList.toggle("live-on", !!live);
+  main.innerHTML = conflictCard() + schemaBanner() + (live ? vLive(live) : ({ planning: vPlanning, matches: vMatches, players: vPlayers, lineup: vLineup, season: vSeason, settings: vSettings }[ui.tab] || vPlanning)());
   setTimeout(autoTravel, 300);
   if (canEdit() && ui.tab === "settings" && !S.settings.homeAddress && S.settings.club && !ui.homeTried) {
     ui.homeTried = true; ensureHome().then(h => { if (h) { render(); toast("Adres van je sportcomplex gevonden. Controleer het even."); } });
   }
   if (st.el) { const el = document.getElementById(st.el); if (el) el.focus(); }
 }
+// De database is ouder dan deze versie van de app: het script moet opnieuw draaien.
+function schemaBanner() {
+  if (mode !== "cloud" || !schemaVersion || schemaVersion >= SCHEMA_NEEDED) return "";
+  return `<div class="notice"><strong>De database moet bijgewerkt worden.</strong> Open Supabase → SQL Editor → New query, plak de inhoud van <em>supabase/schema.sql</em> uit de repository en klik op Run. Tot die tijd werken mede-coaches, eerdere versies en de controle op gelijktijdig wijzigen niet.</div>`;
+}
 function vLoading() { return `<div class="card empty"><p class="muted">${t("Laden…")}</p></div>`; }
 function vError() { return `<div class="card empty"><h2>Dat lukt niet</h2><p class="muted">${esc(errorText)}</p><a class="btn" href="${location.pathname}">Naar de beginpagina</a></div>`; }
 function vLogin() {
   return `<form class="card" id="loginform" style="max-width:460px;justify-self:center;width:100%"><h2>Inloggen</h2>
+    ${(() => { try { return localStorage.getItem("teamplanner.invite"); } catch (e) { return null; } })() ? `<div class="notice">Je bent uitgenodigd als coach van een team. Log in met je e-mailadres; daarna zie je het team meteen.</div>` : ""}
     <p class="muted">Plan rijders, grensrechters, de was en een eerlijk wisselschema voor je jeugdteam. Je logt in met je e-mailadres, zonder wachtwoord.</p>
+    <p class="small"><a href="privacy.html">Wat bewaart de app en wie ziet wat?</a></p>
     ${ui.loginSent ? `<div class="notice">We hebben een mail gestuurd naar ${esc(ui.loginEmail)}. Open die mail op dit apparaat en tik op de link om in te loggen. Geen mail gezien? Kijk ook bij spam.</div>
       <details><summary>Staat er een code in de mail?</summary><div class="stack" style="margin-top:8px">
       <label class="f">Code uit de mail<input id="lf-code" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
@@ -759,7 +1053,114 @@ function accountCard() {
     <p class="small muted">Met deze link zien ouders de komende wedstrijden, tijden en taken. Ze kunnen niets wijzigen en zien geen wisselschema's.</p>
     <input id="share-url" readonly value="${esc(url)}" aria-label="Kijklink">
     <div class="row"><button class="btn primary" data-act="copyshare">Kopieer kijklink</button><button class="btn ${ui.arm === "rotate" ? "arm" : "ghost"}" data-act="rotate">${ui.arm === "rotate" ? "Zeker? De oude link stopt" : "Nieuwe link maken"}</button></div>
+  </div>
+  ${coachesCard()}`;
+}
+const isOwner = () => { const t = teams.find(x => x.id === teamId); return !t || !t.owner || !user || t.owner === user.id; };
+// ---------- nieuw seizoen en spelers naar een ander team ----------
+function seasonCard() {
+  if (!canEdit() || !S.players.length) return "";
+  const others = mode === "cloud" ? teams.filter(t => t.id !== teamId) : [];
+  return `<div class="card"><h3>Nieuw seizoen of nieuwe periode</h3>
+    <p class="small muted">Begin opnieuw met dezelfde spelers. Voorbije wedstrijden gaan weg, dus speelminuten en taken tellen weer vanaf nul. De huidige stand bewaart de app eerst bij Eerdere versies.</p>
+    <div class="checks"><label><input type="checkbox" id="ns-future"> Ook alle komende wedstrijden weghalen</label></div>
+    <div class="row"><button class="btn ${ui.arm === "newseason" ? "arm" : ""}" data-act="newseason">${ui.arm === "newseason" ? "Zeker? Tik nogmaals" : "Start nieuwe periode"}</button></div>
+    ${others.length ? `<h3>Spelers naar een ander team</h3>
+    <p class="small muted">Nieuwe teamindeling? Kopieer spelers met hun posities en ouders naar een ander team van jou. Hier blijven ze staan tot je ze bij Spelers verwijdert.</p>
+    <details><summary>Spelers kiezen</summary><div class="checks" style="margin-top:8px">${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => `<label><input type="checkbox" name="cp" value="${p.id}"> ${esc(p.name)}</label>`).join("")}</div></details>
+    <div class="grid2"><label class="f">Naar team<select id="cp-team">${others.map(t => `<option value="${t.id}">${esc(t.name || "Naamloos team")}</option>`).join("")}</select></label></div>
+    <div class="row"><button class="btn" data-act="copyplayers">Kopieer naar dat team</button></div>` : ""}
   </div>`;
+}
+async function newSeason() {
+  const all = document.getElementById("ns-future") && document.getElementById("ns-future").checked;
+  await snapshot("vóór nieuwe periode");
+  const today = todayStr(); const before = S.matches.length;
+  S.matches = all ? [] : S.matches.filter(m => m.date >= today);
+  S.matches.forEach(m => { delete m.lineup; delete m.played; delete m.live; });
+  if (mode === "cloud" && round.open) await setRound(false, []);
+  save(); render(); toast((before - S.matches.length) + " wedstrijd(en) weggehaald. Succes met de nieuwe periode!");
+}
+async function copyPlayers() {
+  const ids = [...document.querySelectorAll('input[name="cp"]:checked')].map(x => x.value); const target = document.getElementById("cp-team").value;
+  if (!ids.length) { toast("Kies eerst spelers."); return; }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data, error } = await sb.from("teams").select(hasRev() ? "data,rev" : "data").eq("id", target).single();
+    if (error) { toast("Dat team kon niet geladen worden."); return; }
+    const T = normalize(data.data); const have = new Set(T.players.map(p => p.name.toLowerCase())); let n = 0;
+    S.players.filter(p => ids.includes(p.id) && !have.has(p.name.toLowerCase())).forEach(p => {
+      const c = JSON.parse(JSON.stringify(p)); c.id = uid(); T.players.push(c); n++; });
+    T.updatedAt = Date.now();
+    let q = sb.from("teams").update({ data: T }).eq("id", target); if (hasRev()) q = q.eq("rev", data.rev);
+    const r = await q.select("id");
+    if (r.error) { toast("Kopiëren lukte niet: " + r.error.message); return; }
+    if (r.data && r.data.length) { writeLS(LS_KEY + "." + target, null); toast(n + " speler(s) gekopieerd" + (n < ids.length ? " (" + (ids.length - n) + " stond(en) er al)." : ".")); return; }
+  }
+  toast("Dat team werd tegelijk gewijzigd. Probeer het nog eens.");
+}
+// ---------- mede-coaches ----------
+function coachesCard() {
+  if (mode !== "cloud" || !hasRev()) return "";
+  const pp = ui.people;
+  return `<div class="card"><h3>Coaches van dit team</h3>
+    <p class="small muted">Nodig je mede-trainer of leider uit. Die logt in met een eigen e-mailadres en kan daarna alles in dit team zien en wijzigen. De uitnodigingslink werkt 14 dagen; deel hem alleen met de coaches zelf, niet in de oudergroep.</p>
+    ${!pp ? `<div class="row"><button class="btn" data-act="people">Toon coaches</button></div>` : pp.loading ? `<p class="small muted">Laden…</p>`
+      : `<div class="stack">${pp.list.map(x => `<div class="row between version"><span>${esc(x.email || "onbekend")} ${x.is_owner ? '<span class="pill">eigenaar</span>' : ""}${user && x.user_id === user.id ? ' <span class="muted small">(jij)</span>' : ""}</span>
+        ${!x.is_owner && isOwner() && x.user_id !== user.id ? `<button class="btn ${ui.arm === "kick" + x.user_id ? "arm" : "ghost danger"}" data-act="kick" data-id="${x.user_id}">${ui.arm === "kick" + x.user_id ? "Zeker? Tik nogmaals" : "Weghalen"}</button>` : ""}</div>`).join("")}</div>`}
+    ${ui.invite ? `<input id="invite-url" readonly value="${esc(ui.invite)}" aria-label="Uitnodigingslink"><div class="row"><button class="btn primary" data-act="copyinvite">Kopieer uitnodiging</button></div>`
+      : `<div class="row"><button class="btn" data-act="invite">Mede-coach uitnodigen</button></div>`}
+  </div>`;
+}
+async function loadPeople() {
+  ui.people = { loading: true }; render();
+  const { data, error } = await sb.rpc("team_people", { p_team: teamId });
+  ui.people = error ? null : { list: data || [] }; if (error) toast("Coaches ophalen lukte niet."); render();
+}
+async function makeInvite() {
+  const tok = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+  const { error } = await sb.from("team_invites").insert({ team_id: teamId, token: tok });
+  if (error) { toast("Uitnodiging maken lukte niet: " + error.message); return; }
+  ui.invite = location.origin + location.pathname + "?uitnodiging=" + tok; render();
+}
+const inviteText = () => "Hoi! Wil je samen met mij het schema van " + teamName() + " bijhouden in de Teamplanner? Open deze link en log in met je e-mailadres (de link werkt 14 dagen):\n" + ui.invite;
+async function kickCoach(uid) {
+  const { error } = await sb.from("team_members").delete().eq("team_id", teamId).eq("user_id", uid);
+  if (error) { toast("Weghalen lukte niet."); return; }
+  toast("Coach weggehaald."); loadPeople();
+}
+// ---------- team verwijderen, team verlaten, account opheffen ----------
+function dangerCard() {
+  if (mode !== "cloud") return "";
+  const own = isOwner();
+  return `<div class="card"><h3>Team of account verwijderen</h3>
+    <p class="small muted">${own ? "Verwijder je dit team, dan verdwijnen alle spelers, wedstrijden, versies, het logo, de teamfoto en wat ouders hebben doorgegeven. De kijklink werkt dan niet meer. Dit kan niet ongedaan worden; maak eerst een back-up als je twijfelt." : "Je bent mede-coach van dit team. Verlaat je het team, dan zie je het niet meer; de gegevens blijven bij de eigenaar."}</p>
+    <div class="row">${own ? `<button class="btn ${ui.arm === "delteam" ? "arm" : "danger"}" data-act="delteam">${ui.arm === "delteam" ? "Zeker? " + esc(teamName()) + " wordt helemaal verwijderd" : "Dit team verwijderen"}</button>`
+      : `<button class="btn ${ui.arm === "leaveteam" ? "arm" : "danger"}" data-act="leaveteam">${ui.arm === "leaveteam" ? "Zeker? Tik nogmaals" : "Team verlaten"}</button>`}</div>
+    <p class="small muted">Je account opheffen verwijdert je e-mailadres en alle teams waarvan jij de eigenaar bent. Bij teams waar je mede-coach bent, word je weggehaald.</p>
+    <div class="row"><button class="btn ${ui.arm === "delaccount" ? "arm" : "danger"}" data-act="delaccount" ${hasRev() ? "" : "disabled"}>${ui.arm === "delaccount" ? "Zeker? Je account en eigen teams verdwijnen" : "Account opheffen"}</button></div>
+  </div>`;
+}
+async function removeTeamMedia(id) {
+  try { const { data } = await sb.storage.from("team-media").list(id); if (data && data.length) await sb.storage.from("team-media").remove(data.map(f => id + "/" + f.name)); } catch (e) {}
+}
+async function deleteTeam() {
+  await removeTeamMedia(teamId);
+  const { error } = await sb.from("teams").delete().eq("id", teamId);
+  if (error) { toast("Verwijderen lukte niet: " + error.message); return; }
+  writeLS(LS_KEY + "." + teamId, null); writeLS(pendKey(teamId), null);
+  toast("Team verwijderd."); teamId = null; dirty = false; await loadTeams();
+}
+async function leaveTeam() {
+  const { error } = await sb.from("team_members").delete().eq("team_id", teamId).eq("user_id", user.id);
+  if (error) { toast("Dat lukte niet: " + error.message); return; }
+  writeLS(LS_KEY + "." + teamId, null); toast("Je bent geen coach meer van dit team."); teamId = null; dirty = false; await loadTeams();
+}
+async function deleteAccount() {
+  for (const t of teams.filter(t => t.owner === user.id)) await removeTeamMedia(t.id);
+  const { error } = await sb.rpc("delete_my_account");
+  if (error) { toast("Opheffen lukte niet: " + error.message); return; }
+  try { Object.keys(localStorage).filter(k => k.startsWith("teamplanner.")).forEach(k => localStorage.removeItem(k)); } catch (e) {}
+  dirty = false; await sb.auth.signOut(); user = null; teams = []; teamId = null; mode = "login"; render(); toast("Je account is opgeheven.");
 }
 function emptyStart() {
   return `<div class="card empty"><h2>Welkom, coach</h2>
@@ -776,13 +1177,18 @@ function joinParents(ids) {
   return list(parts);
 }
 function dutyRow(label, ids, extra) {
-  return `<div class="duty"><span>${label}</span><div>${ids && ids.length ? esc(joinParents(ids)) : '<span class="muted">${t("niemand")}</span>'}${extra || ""}</div></div>`;
+  return `<div class="duty"><span>${label}</span><div>${ids && ids.length ? esc(joinParents(ids)) : `<span class="muted">${t("niemand")}</span>`}${extra || ""}</div></div>`;
 }
 function matchCard(m, isNext) {
   const tm = times(m); const d = m.duties || {}; const issues = dutyIssues(m);
+  if (m.cancelled) return `<article class="card cancelled">
+    <div class="row between"><span class="date">${esc(fmtDate(m.date))}</span><span class="pill warn">${t("AFGELAST")}</span></div>
+    <div class="opp"><bdi><s>${m.home ? "" : "@ "}${esc(m.opponent || t("Tegenstander?"))}</s></bdi></div>
+    <div class="row actions"><button class="btn" data-act="copy" data-id="${m.id}">${t("Kopieer bericht")}</button>
+    ${canEdit() ? `<button class="btn ghost" data-act="editmatch" data-id="${m.id}">Wijzig</button>` : ""}</div></article>`;
   return `<article class="card ${isNext ? "next" : ""}">
     <div class="row between"><span class="date">${esc(fmtDate(m.date))}${isNext ? " · " + t("eerstvolgende") : ""}</span>
-      <span class="row">${m.locked ? `<span class="pill lock">${t("vastgezet")}</span>` : ""}<span class="pill ${m.home ? "home" : "away"}">${m.home ? t("THUIS") : t("UIT")}</span></span></div>
+      <span class="row">${m.moved ? `<span class="pill warn">${t("verplaatst")}</span>` : ""}${m.locked ? `<span class="pill lock">${t("vastgezet")}</span>` : ""}<span class="pill ${m.home ? "home" : "away"}">${m.home ? t("THUIS") : t("UIT")}</span></span></div>
     <div class="opp"><bdi>${m.home ? "" : "@ "}${esc(m.opponent || t("Tegenstander?"))}</bdi></div>
     <div class="times">
       ${m.home ? "" : `<div class="time key"><span>${t("Vertrek")}</span><b>${tm.depart}</b></div>`}
@@ -823,13 +1229,14 @@ function dutyEditor(m) {
 function vPlanning() {
   if (!S.players.length && !S.matches.length) return canEdit() ? emptyStart() : `<div class="card empty"><p class="muted">${t("De coach heeft nog geen wedstrijden ingepland.")}</p></div>`;
   const today = todayStr(); const up = sorted().filter(m => m.date >= today);
-  const noDuty = up.filter(m => !m.duties).length;
+  const noDuty = up.filter(m => !m.duties && !m.cancelled).length;
   return `${S.settings.photoUrl ? `<img class="teamphoto" src="${esc(S.settings.photoUrl)}" alt="Teamfoto ${esc(S.settings.team)}">` : ""}
     <div class="row between"><div><h2>${t("Komende wedstrijden")}</h2><p class="muted small">${t("Aanwezig {n} min voor de aftrap. Bij uitwedstrijden rekent de planner de vertrektijd vanaf de thuisclub uit.", { n: S.settings.arriveBefore })}</p></div>
     ${canEdit() ? `<button class="btn primary" data-act="plan">${noDuty ? "Maak taakschema" : "Taakschema opnieuw verdelen"}</button>` : ""}</div>
     <p class="muted small" ${canEdit() ? "" : "hidden"}>Vastgezette en gespeelde wedstrijden blijven zoals ze zijn. De rest wordt eerlijk verdeeld: wie het minst vaak aan de beurt was, gaat voor.</p>
     ${roundCard()}${parentCard()}
-    ${up.length ? up.map((m, i) => matchCard(m, i === 0)).join("") : `<div class="card empty"><p class="muted">${t("Nog geen komende wedstrijden.")}</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
+    ${up.length ? up.map(m => matchCard(m, m === up.find(x => !x.cancelled))).join("") : `<div class="card empty"><p class="muted">${t("Nog geen komende wedstrijden.")}</p>${canEdit() ? '<button class="btn primary" data-act="newmatch">Wedstrijd toevoegen</button>' : ""}</div>`}
+    ${mode === "shared" ? `<p class="small muted"><a href="privacy.html">${t("Privacy")}</a></p>` : ""}
     ${up.length ? `<div class="row"><button class="btn" data-act="copyall">${t("Kopieer hele schema")}</button>${canEdit() && up.some(m => !m.home && !+m.travel) ? '<button class="btn" data-act="calcall">Bereken ontbrekende reistijden</button>' : ""}</div>` : ""}`;
 }
 function matchForm(m) {
@@ -842,6 +1249,7 @@ function matchForm(m) {
       <label class="f">Thuis of uit<select id="mf-home" name="home"><option value="1" ${m.home !== false ? "selected" : ""}>Thuis</option><option value="0" ${m.home === false ? "selected" : ""}>Uit</option></select></label>
       <label class="f">Tegenstander<input id="mf-opp" name="opponent" list="opps" value="${esc(m.opponent || "")}" placeholder="bv. SV Oranje JO11-1" required></label>
     </div>
+    ${isNew ? "" : `<div class="checks"><label><input type="checkbox" name="cancelled" ${m.cancelled ? "checked" : ""}> Afgelast (taken vervallen; wie aan de beurt was, komt een volgende keer weer aan de beurt na Taakschema opnieuw verdelen)</label></div>`}
     <datalist id="opps">${known.map(x => `<option value="${esc(x.opponent)}">`).join("")}</datalist>
     <div class="grid2" id="awayfields" ${m.home !== false ? "hidden" : ""}>
       <label class="f">Adres uitclub<input id="mf-addr" name="address" value="${esc(m.address || "")}" placeholder="Sportpark, straat, plaats"></label>
@@ -874,7 +1282,7 @@ function vMatches() {
         : `<div class="notice">Geen wedstrijden gevonden. Zorg dat bij elke wedstrijd een datum, een aftrap (bv. 10:30) en de twee teams staan.</div>`) : ""}
     </details>
     ${list.length ? `<div class="tablewrap"><table><thead><tr><th>Datum</th><th></th><th>Tegenstander</th><th>Aftrap</th><th>Aanwezig</th><th>Vertrek</th><th></th></tr></thead><tbody>
-    ${list.map(m => { const t = times(m); return `<tr style="${isPast(m) ? "opacity:.6" : ""}"><td>${esc(fmtDate(m.date))}</td><td><span class="pill ${m.home ? "home" : "away"}">${m.home ? "T" : "U"}</span></td><td>${esc(m.opponent)}</td><td>${t.ko}</td><td>${t.arrive}</td><td>${t.depart || "–"}</td><td><button class="btn ghost small" data-act="editmatch" data-id="${m.id}">Wijzig</button></td></tr>`; }).join("")}
+    ${list.map(m => { const t = times(m); return `<tr style="${isPast(m) ? "opacity:.6" : ""}"><td>${esc(fmtDate(m.date))}</td><td><span class="pill ${m.home ? "home" : "away"}">${m.home ? "T" : "U"}</span></td><td>${m.cancelled ? "<s>" + esc(m.opponent) + "</s> " + '<span class="pill warn">afgelast</span>' : esc(m.opponent)}${m.moved && !m.cancelled ? ' <span class="pill warn">verplaatst</span>' : ""}</td><td>${t.ko}</td><td>${t.arrive}</td><td>${t.depart || "–"}</td><td><button class="btn ghost small" data-act="editmatch" data-id="${m.id}">Wijzig</button></td></tr>`; }).join("")}
     </tbody></table></div>` : `<p class="muted">Nog geen wedstrijden. Voeg het programma toe zoals het op de clubsite staat.</p>`}`;
 }
 function playerForm(p) {
@@ -920,7 +1328,7 @@ function vPlayers() {
       : `<p class="muted">Nog geen spelers.</p>`}`;
 }
 function vLineup() {
-  const list = sorted();
+  const list = sorted().filter(x => !x.cancelled);
   if (!list.length || !S.players.length) return `<h2>Wisselschema</h2><p class="muted">Voeg eerst spelers en wedstrijden toe.</p>`;
   if (!ui.lineupMatch || !list.find(m => m.id === ui.lineupMatch)) ui.lineupMatch = (list.find(m => m.date >= todayStr()) || list[list.length - 1]).id;
   const m = list.find(x => x.id === ui.lineupMatch); const pres = present(m);
@@ -955,21 +1363,21 @@ function vLineup() {
       <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${S.settings.blocks} blokken van ${Math.round(bm)} min</span></strong></div>
     </div>
     <div class="checks"><label><input type="checkbox" id="lu-reserve" data-act="usereserve" ${useReserve(m) ? "checked" : ""} ${m.played ? "disabled" : ""}> Reservekeeper keept de tweede helft${S.players.some(p => (p.positions || []).includes("R")) ? "" : ' <span class="muted small">(geef bij Spelers eerst iemand de positie reservekeeper)</span>'}</label></div>
-    <div class="row"><button class="btn primary" data-act="genlineup">${m.lineup ? "Opnieuw maken" : "Maak wisselschema"}</button>
-    ${m.lineup ? `<button class="btn ${m.played ? "" : ""}" data-act="played">${m.played ? "✓ Gespeeld (telt mee)" : "Markeer als gespeeld"}</button><button class="btn ghost" data-act="copylineup">Kopieer opstelling</button>` : ""}</div>
+    <div class="row"><button class="btn primary" data-act="genlineup" ${m.played ? "disabled" : ""}>${m.lineup ? "Opnieuw maken" : "Maak wisselschema"}</button>
+    ${m.lineup ? `<button class="btn ${m.played ? "" : ""}" data-act="played">${m.played ? "✓ Gespeeld (telt mee)" : "Markeer als gespeeld"}</button><button class="btn ghost" data-act="copylineup">Kopieer opstelling</button>${m.played ? "" : '<button class="btn" data-act="golive">⏱ Wedstrijdmodus</button>'}` : ""}</div>
     <p class="small muted">Kinderen met de minste speelminuten dit seizoen krijgen voorrang. Wie het vorige blok wisselde, gaat er het volgende blok weer in. Een gespeelde wedstrijd telt mee voor het seizoensoverzicht.</p></div>
     ${table}`;
 }
 function vSeason() {
   if (!S.players.length) return `<h2>Seizoen</h2><p class="muted">Nog geen spelers.</p>`;
   const st = seasonStats(null); const max = Math.max(1, ...Object.values(st).map(x => x.min));
-  const playedN = S.matches.filter(m => m.played).length;
+  const playedN = S.matches.filter(counts).length;
   const dc = {}; S.players.forEach(p => dc[p.id] = { drive: 0, flag: 0, wash: 0 });
   S.matches.forEach(m => Object.entries(m.duties || {}).forEach(([k, ids]) => (ids || []).forEach(id => { if (dc[id]) dc[id][k]++; })));
   const rows = S.players.slice().sort((a, b) => st[b.id].min - st[a.id].min);
   const avg = rows.reduce((s, p) => s + st[p.id].min, 0) / rows.length;
   return `<h2>Seizoen</h2>
-  <p class="muted small">${playedN} gespeelde wedstrijd(en) met wisselschema. Gemiddeld ${Math.round(avg)} speelminuten per kind.</p>
+  <p class="muted small">${playedN} gespeelde wedstrijd(en) met wisselschema. Gemiddeld ${Math.round(avg)} speelminuten per kind. Een wedstrijd telt mee zodra je hem als gespeeld markeert of de datum voorbij is; afgelaste wedstrijden tellen niet mee.</p>
   <div class="tablewrap"><table><thead><tr><th>Speler</th><th>Speelminuten</th><th class="c">Min</th><th class="c">% van mogelijk</th><th class="c">Keeper-blokken</th></tr></thead><tbody>
   ${rows.map(p => { const x = st[p.id]; return `<tr><td>${esc(p.name)}</td><td><div class="bar"><i style="width:${(x.min / max * 100).toFixed(0)}%"></i></div></td><td class="c">${Math.round(x.min)}</td><td class="c">${x.avail ? Math.round(x.min / x.avail * 100) + "%" : "–"}</td><td class="c">${x.keeper}</td></tr>`; }).join("")}
   </tbody></table></div>
@@ -982,7 +1390,7 @@ function vSettings() {
   const s = S.settings;
   return `<h2>Instellingen</h2>
   <div class="card"><h3>Logo en teamfoto</h3>
-    <p class="small muted">Het logo staat bovenin de app, de teamfoto boven de wedstrijden. Ouders zien ze ook via de kijklink.</p>
+    <p class="small muted">Het logo staat bovenin de app, de teamfoto boven de wedstrijden. Ouders zien ze ook via de kijklink. Een foto staat openbaar online: wie het adres van de foto heeft, kan hem bekijken. Vraag daarom eerst toestemming aan de ouders en volg de beeldregels van je club.</p>
     <div class="media-grid">
       <div class="stack"><span class="small muted">Clublogo</span>
         <div class="media-prev logo-prev">${s.logoUrl ? `<img src="${esc(s.logoUrl)}" alt="Clublogo">` : '<span class="muted small">Nog geen logo</span>'}</div>
@@ -1025,13 +1433,17 @@ function vSettings() {
     <div class="row"><button class="btn primary" type="submit">Opslaan</button></div>
   </form>
   ${accountCard()}
+  ${versionsCard()}
+  ${seasonCard()}
+  <p class="small muted"><a href="privacy.html">Privacy: wat de app bewaart en wie wat ziet</a></p>
   <div class="card"><h3>Back-up</h3>
     <details><summary>Back-up maken of terugzetten</summary><div class="stack" style="margin-top:8px">
       <textarea id="backup" aria-label="Back-up">${esc(JSON.stringify(S))}</textarea>
       <div class="row"><button class="btn" data-act="copybackup">Kopieer back-up</button><button class="btn" data-act="restore">Zet tekst hierboven terug</button></div></div></details>
-    <div class="row"><button class="btn ${ui.arm === "reset" ? "arm" : "danger"}" data-act="reset">${ui.arm === "reset" ? "Zeker weten? Alles wordt gewist" : "Alles wissen"}</button>
-    <button class="btn ghost" data-act="sample">Voorbeeldteam laden</button></div>
-  </div>`;
+    <div class="row"><button class="btn ${ui.arm === "reset" ? "arm" : "danger"}" data-act="reset">${ui.arm === "reset" ? "Zeker? Alle spelers en wedstrijden worden gewist" : "Alles wissen"}</button>
+    ${teamEmpty() ? '<button class="btn ghost" data-act="sample">Voorbeeldteam laden</button>' : ""}</div>
+  </div>
+  ${dangerCard()}`;
 }
 
 // label, onField, minutes, blocks, formation
@@ -1124,7 +1536,9 @@ function parseProgram(text) {
 }
 
 // ---------- sample ----------
+const teamEmpty = () => !S.players.length && !S.matches.length;
 function loadSample() {
+  if (!teamEmpty()) { toast("Het voorbeeldteam kan alleen in een leeg team. Je eigen gegevens blijven staan."); return; }
   const names = [["Daan", "K,V"], ["Sem", "V"], ["Liam", "V,M"], ["Noah", "M"], ["Finn", "M,A"], ["Luuk", "A"], ["Mees", "V,M,A"], ["Jesse", "K,M"], ["Bram", "A,M"], ["Ties", "V"], ["Mila", "M,A"]];
   const players = names.map(([n, pos], i) => ({ id: uid(), name: n, parent: "", positions: pos.split(","), canDrive: i % 4 !== 1, canFlag: i % 3 !== 2, canWash: i % 5 !== 3, seats: i % 3 === 0 ? 4 : 3 }));
   const base = new Date(); base.setDate(base.getDate() + ((6 - base.getDay() + 7) % 7 || 7));
@@ -1171,8 +1585,22 @@ document.addEventListener("click", e => {
     case "newplayer": ui.editPlayer = "new"; render(); window.scrollTo(0, 0); break;
     case "editplayer": ui.editPlayer = id; render(); window.scrollTo(0, 0); break;
     case "delplayer": if (armed("delp" + id)) { S.players = S.players.filter(x => x.id !== id); ui.editPlayer = null; save(); render(); } break;
-    case "genlineup": { const mm = S.matches.find(x => x.id === ui.lineupMatch); planLineup(mm); save(); render(); toast("Wisselschema gemaakt."); break; }
+    case "genlineup": { const mm = S.matches.find(x => x.id === ui.lineupMatch); if (mm.played) { toast("Deze wedstrijd is gespeeld. Haal eerst het vinkje Gespeeld weg als je het schema echt opnieuw wilt maken."); break; } planLineup(mm); save(); render(); toast("Wisselschema gemaakt."); break; }
     case "played": { const mm = S.matches.find(x => x.id === ui.lineupMatch); mm.played = !mm.played; save(); render(); break; }
+    case "golive": { const mm = S.matches.find(x => x.id === ui.lineupMatch); if (!mm || !mm.lineup) break; ui.live = mm.id; ui.liveBlock = null; render(); window.scrollTo(0, 0); break; }
+    case "liveexit": ui.live = null; keepAwake(false); render(); break;
+    case "liveclock": { const mm = S.matches.find(x => x.id === ui.live); const L = liveOf(mm);
+      try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); if (audio.state === "suspended") audio.resume(); } catch (x) {}
+      if (L.since) { L.acc += Date.now() - L.since; L.since = null; keepAwake(false); } else { L.since = Date.now(); keepAwake(true); }
+      save(); render(); break; }
+    case "liveswap": { const mm = S.matches.find(x => x.id === ui.live); const o = document.getElementById("lv-out").value, i = document.getElementById("lv-in").value;
+      if (!o || !i) break; if (liveSwap(mm, o, i)) { save(); render(); toast(pName(i) + " erin, " + pName(o) + " eruit."); } break; }
+    case "liveinj": { const mm = S.matches.find(x => x.id === ui.live); const pid = document.getElementById("lv-inj").value; if (!pid) break;
+      liveInjured(mm, pid); save(); render(); toast("Schema aangepast: " + pName(pid) + " speelt niet meer mee."); break; }
+    case "livelate": { const mm = S.matches.find(x => x.id === ui.live); const pid = document.getElementById("lv-late").value; if (!pid) break;
+      liveLate(mm, pid); save(); render(); toast(pName(pid) + " doet mee vanaf het volgende blok."); break; }
+    case "liveend": if (armed("liveend")) { const mm = S.matches.find(x => x.id === ui.live); const L = liveOf(mm);
+      if (L.since) { L.acc += Date.now() - L.since; L.since = null; } mm.played = true; ui.live = null; keepAwake(false); save(); render(); toast("Wedstrijd afgelopen. De speelminuten tellen mee."); } break;
     case "copylineup": { const mm = S.matches.find(x => x.id === ui.lineupMatch); copy(lineupText(mm)); break; }
     case "preset": { const p = PRESETS[+t.dataset.i]; const f = document.getElementById("settingsform");
       f.onField.value = p[1]; f.matchMinutes.value = p[2]; f.blocks.value = p[3]; f.formation.value = p[4]; toast(p[0] + " ingevuld. Tik op Opslaan."); break; }
@@ -1184,9 +1612,18 @@ document.addEventListener("click", e => {
     case "loginreset": ui.loginSent = false; render(); break;
     case "newteam": mode = "newteam"; render(); break;
     case "cancelnewteam": mode = "cloud"; render(); break;
-    case "logout": sb.auth.signOut(); break;
+    case "logout": if (dirty) toast("Er zijn nog wijzigingen die niet zijn opgeslagen. Probeer het als je internet hebt."); else sb.auth.signOut(); break;
     case "copyshare": copy(shareUrl()); break;
     case "rotate": if (armed("rotate")) newShareLink(); break;
+    case "people": loadPeople(); break;
+    case "newseason": if (armed("newseason")) newSeason(); break;
+    case "copyplayers": copyPlayers(); break;
+    case "invite": makeInvite(); break;
+    case "copyinvite": copy(inviteText()); break;
+    case "kick": if (armed("kick" + id)) kickCoach(id); break;
+    case "delteam": if (armed("delteam")) deleteTeam(); break;
+    case "leaveteam": if (armed("leaveteam")) leaveTeam(); break;
+    case "delaccount": if (armed("delaccount")) deleteAccount(); break;
     case "calctravel": {
       const info = document.getElementById("travel-info"), btn = t; btn.disabled = true; info.hidden = false; info.textContent = "Bezig met berekenen…";
       const addr = document.getElementById("mf-addr").value.trim(), opp = document.getElementById("mf-opp").value.trim();
@@ -1199,7 +1636,7 @@ document.addEventListener("click", e => {
     case "calcall": calcMissingTravel(); break;
     case "rmmedia": if (armed("rm" + t.dataset.kind)) removeMedia(t.dataset.kind); break;
     case "editduties": ui.editDuties = ui.editDuties === id ? null : id; render(); break;
-    case "roundopen": { const ids = sorted().filter(m => m.date >= todayStr()).map(m => m.id);
+    case "roundopen": { const ids = sorted().filter(m => m.date >= todayStr() && !m.cancelled).map(m => m.id);
       setRound(true, ids).then(ok => { if (ok) { render(); toast("Ronde geopend voor " + ids.length + " wedstrijden. Kopieer het bericht voor de ouders."); } }); break; }
     case "roundcopy": copy(roundText()); break;
     case "roundrefresh": loadAvail().then(() => { render(); toast("Bijgewerkt."); }); break;
@@ -1207,8 +1644,13 @@ document.addEventListener("click", e => {
     case "clubsearch": doClubSearch(t.dataset.p); break;
     case "clubpick": pickClub(t.dataset.p, +t.dataset.i); break;
     case "copybackup": copy(document.getElementById("backup").value); break;
-    case "restore": try { S = normalize(JSON.parse(document.getElementById("backup").value)); save(); render(); toast("Back-up teruggezet."); } catch (x) { toast("Die tekst is geen geldige back-up."); } break;
-    case "reset": if (armed("reset")) { S = DEFAULTS(); save(); ui.tab = "planning"; render(); toast("Alles gewist."); } break;
+    case "restore": { let d; try { d = normalize(JSON.parse(document.getElementById("backup").value)); } catch (x) { toast("Die tekst is geen geldige back-up."); break; }
+      snapshot("vóór back-up terugzetten").then(() => { S = d; save(); render(); toast("Back-up teruggezet. De vorige stand staat bij Eerdere versies."); }); break; }
+    case "reset": if (armed("reset")) snapshot("vóór alles wissen").then(() => { S = DEFAULTS(); save(); ui.tab = "planning"; render(); toast("Alles gewist. Per ongeluk? Zet het terug bij Eerdere versies."); }); break;
+    case "versions": loadVersions(); break;
+    case "restorever": if (armed("ver" + id)) restoreVersion(id); break;
+    case "conflictmine": resolveConflict(true); break;
+    case "conflicttheirs": resolveConflict(false); break;
   }
 });
 async function login(fd) {
@@ -1273,6 +1715,9 @@ document.addEventListener("submit", e => {
   if (f.id === "newteamform") { createTeam(fd); return; }
   if (f.id === "matchform") {
     const id = f.dataset.id; const m = id ? S.matches.find(x => x.id === id) : { id: uid() };
+    const wasCancelled = !!m.cancelled; m.cancelled = fd.has("cancelled");
+    if (id && (m.date !== fd.get("date") || m.time !== fd.get("time")) && (m.duties || m.locked)) m.moved = true;
+    if (m.cancelled && !wasCancelled) { m.duties = null; m.locked = false; m.moved = false; }
     m.date = fd.get("date"); m.time = fd.get("time"); m.home = fd.get("home") === "1"; m.opponent = (fd.get("opponent") || "").trim();
     const newAddr = m.home ? "" : (fd.get("address") || "").trim();
     if (newAddr !== (m.address || "")) { m.travelPlace = ui.travelCalc && ui.travelCalc.addr === newAddr ? ui.travelCalc.label : ""; }
@@ -1282,7 +1727,7 @@ document.addEventListener("submit", e => {
     ui.travelCalc = null;
     if (!id) S.matches.push(m);
     if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid)));
-    ui.editMatch = null; save(); render(); toast("Wedstrijd opgeslagen. Verdeel het taakschema opnieuw als er iets veranderd is.");
+    ui.editMatch = null; save(); render(); toast(m.cancelled && !wasCancelled ? "Wedstrijd afgelast. Tik bij Planning op Taakschema opnieuw verdelen, dan schuiven de beurten door." : "Wedstrijd opgeslagen. Verdeel het taakschema opnieuw als er iets veranderd is.");
   } else if (f.id === "playerform") {
     const id = f.dataset.id; const p = id ? pById(id) : { id: uid() };
     p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos"); p.pref = fd.get("pref") || ""; if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref);
@@ -1302,6 +1747,10 @@ document.addEventListener("submit", e => {
   }
 });
 
-window.__tp = { get S() { return S; }, matchText, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
+window.__tp = { get S() { return S; }, set S(x) { S = normalize(x); }, setAvail(a) { avail = a; }, render, lineupMinutes, liveSwap, liveInjured, liveLate, counts, dutyIssues, matchText, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
+// Offline: de app zelf (pagina, code, opmaak) wordt bewaard zodat hij ook zonder bereik opent.
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
 render(); init();
 })();
