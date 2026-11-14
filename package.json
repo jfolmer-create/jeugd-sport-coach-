@@ -1,0 +1,7 @@
+{
+  "name": "jeugd-sport-coach",
+  "private": true,
+  "description": "Teamplanner voor jeugdteams: statische site, geen build-stap. Alleen nodig om de tests te draaien.",
+  "scripts": { "test": "node tests/run.cjs" },
+  "devDependencies": { "playwright": "1.56.1" }
+}
