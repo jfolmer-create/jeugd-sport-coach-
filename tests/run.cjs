@@ -145,8 +145,22 @@ function check(name, ok, info) { if (ok) { passed++; console.log("  ✓ " + name
   const ver = await page.$('[data-act="restorever"]'); check("na alles wissen staat er een eerdere versie", !!ver);
   if (ver) { await ver.click(); await page.click('[data-act="restorever"]'); await page.waitForTimeout(200); }
   check("eerdere versie terugzetten brengt de spelers terug", (await ev(() => window.__tp.S.players.length)) === 13);
+  // Spelers: compacte lijst, posities uitklappen
+  await page.click('nav.tabs button[data-tab="players"]');
+  check("spelerslijst is compact (posities pas na tikken)", !(await page.$('[data-act="togpos"]')));
+  await page.click('[data-act="openplayer"]'); check("posities uitklappen werkt", !!(await page.$('[data-act="togpos"]')));
   // Wedstrijdmodus
   await page.click('nav.tabs button[data-tab="lineup"]'); await page.click('[data-act="genlineup"]');
+  check("geen horizontaal scrollen op de pagina Wissels", await ev(() => document.documentElement.scrollWidth <= window.innerWidth));
+  const chips = await page.$$(".pitch .pchip"); const benchChip = await page.$(".benchrow .pchip");
+  const idA = await chips[0].getAttribute("data-id"), idB = await benchChip.getAttribute("data-id");
+  await chips[0].click(); await page.click('.benchrow .pchip[data-id="' + idB + '"]');
+  const swapped = await ev(ids => { const m = window.__tp.S.matches.find(x => x.lineup); return m.lineup.cells[ids[0]][0] === "-" && m.lineup.cells[ids[1]][0] !== "-"; }, [idA, idB]);
+  check("twee spelers aantikken ruilt ze in dat blok (veld en bank)", swapped);
+  const auto = await ev(() => { const tp = window.__tp; const m = tp.S.matches.find(x => x.lineup); const c = m.lineup.cells; const ids = Object.keys(c);
+    const k = ids.find(id => c[id][1] === "K"), o = ids.find(id => c[id][1] !== "K" && c[id][1] !== "-"); const was = c[o][1]; const sw = tp.setCell(m, o, 1, "K");
+    return sw === k && c[k][1] === was && ids.filter(id => c[id][1] === "K").length === 1; });
+  check("vakje wijzigen naar een bezette plek: de ander ruilt automatisch mee", auto);
   await page.click('[data-act="golive"]');
   check("wedstrijdmodus toont de klok", !!(await page.$("#live-clock")));
   await page.click('[data-act="liveclock"]'); await page.waitForTimeout(2300);

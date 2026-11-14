@@ -1,9 +1,9 @@
 // Service worker: bewaart de app zelf, zodat hij ook opent waar geen bereik is (langs het veld).
 // De gegevens zelf staan in de browser (localStorage) en in Supabase; verzoeken aan Supabase en kaartdiensten gaan altijd naar het netwerk.
-const CACHE = "teamplanner-v33";
+const CACHE = "teamplanner-v34";
 const SHELL = [
   "./", "index.html", "privacy.html", "manifest.webmanifest",
-  "css/style.css?v=33", "js/i18n.js?v=33", "js/config.js?v=33", "js/app.js?v=33",
+  "css/style.css?v=34", "js/i18n.js?v=34", "js/config.js?v=34", "js/app.js?v=34",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png",
   "fonts/barlow-latin-400-normal.woff2", "fonts/barlow-latin-500-normal.woff2", "fonts/barlow-latin-600-normal.woff2",
   "fonts/barlow-condensed-latin-600-normal.woff2", "fonts/barlow-condensed-latin-700-normal.woff2",

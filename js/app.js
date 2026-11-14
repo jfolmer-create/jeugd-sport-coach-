@@ -836,6 +836,41 @@ function planLineup(m, opts = {}) {
   m.lineup = { cells, durs, matchMinutes: old ? old.matchMinutes : +S.settings.matchMinutes || 60, created: old ? old.created : Date.now(), adj, out: [...out] };
 }
 
+// Een vakje in het wisselschema aanpassen. Komt een plek daardoor dubbel te staan, dan ruilt degene die er stond mee
+// (hij krijgt de oude plek van deze speler, of gaat naar de bank). Geeft terug wie er meeruilde.
+function setCell(m, pid, b, v) {
+  const cells = m.lineup.cells; const old = cells[pid][b]; if (old === v) return null;
+  cells[pid][b] = v; if (v === "-") return null;
+  const max = v === "K" ? 1 : slotsFor().filter(x => x === v).length || 1;
+  const holders = Object.keys(cells).filter(id => id !== pid && cells[id][b] === v);
+  if (holders.length + 1 <= max) return null;
+  const other = holders[0]; cells[other][b] = old; return other;
+}
+function swapCells(m, a, c, b) { const cells = m.lineup.cells; const x = cells[a][b]; cells[a][b] = cells[c][b]; cells[c][b] = x; }
+const fitsSlot = (p, slot) => slot === "-" || (slot === "K" ? ((p.positions || []).includes("K") || (p.positions || []).includes("R")) : fits(p, slot));
+// Opstelling van één blok als veld: aanval boven, keeper onder. Tik twee spelers aan om ze te ruilen.
+const PITCH_ROWS = [["LA", "SP", "A", "RA"], ["AM"], ["LM", "CM", "M", "RM"], ["VM"], ["LB", "CV", "V", "RB"], ["K"]];
+function pitchView(m) {
+  const d = lineupDurs(m); const C = d.length; const b = Math.min(ui.pitchBlock || 0, C - 1); const cells = m.lineup.cells;
+  const at = d.map((_, i) => d.slice(0, i).reduce((a, x) => a + x, 0));
+  const ids = present(m).filter(p => cells[p.id]).map(p => p.id);
+  const chip = id => { const p = pById(id); const c = cells[id][b]; const off = p && !fitsSlot(p, c);
+    return `<button type="button" class="pchip ${ui.pick === id ? "picked" : ""} ${off ? "off" : ""} ${c === "K" ? "keeper" : ""}" data-act="pick" data-id="${id}" aria-pressed="${ui.pick === id}"><b>${c === "-" ? "" : esc(c)}</b>${esc(shortName(id))}${off ? " ⚠" : ""}</button>`; };
+  const rows = PITCH_ROWS.map(r => ids.filter(id => r.includes(cells[id][b])).sort((x, y) => r.indexOf(cells[x][b]) - r.indexOf(cells[y][b]))).filter(r => r.length);
+  const bench = ids.filter(id => cells[id][b] === "-");
+  const offN = ids.filter(id => { const p = pById(id); return p && !fitsSlot(p, cells[id][b]); }).length;
+  return `<div class="card"><div class="row between"><h3>Opstelling</h3><span class="small muted">${Math.round(at[b])}′–${Math.round(at[b] + d[b])}′</span></div>
+    <div class="blocktabs" role="tablist">${d.map((_, i) => `<button type="button" role="tab" class="btn ${i === b ? "primary" : ""}" aria-selected="${i === b}" data-act="pitchblock" data-b="${i}">Blok ${i + 1}</button>`).join("")}</div>
+    <div class="pitch">${rows.map(r => `<div class="prow">${r.map(chip).join("")}</div>`).join("")}</div>
+    <div class="benchrow"><span class="small muted">Bank</span>${bench.map(chip).join("") || '<span class="small muted">niemand</span>'}</div>
+    <p class="small muted">${ui.pick ? `<strong>${esc(pName(ui.pick))}</strong> gekozen: tik op de speler waarmee hij ruilt.` : "Tik op een speler en daarna op een andere om ze in dit blok te ruilen, ook met de bank."}${offN ? " ⚠ = staat niet op een plek die bij Spelers is aangevinkt." : ""}</p></div>`;
+}
+// Voornaam, met de eerste letter van de achternaam als er twee dezelfde voornamen zijn.
+function shortName(id) {
+  const p = pById(id); if (!p) return "?"; const parts = p.name.trim().split(/\s+/); const first = parts[0];
+  const dup = S.players.some(x => x.id !== id && x.name.trim().split(/\s+/)[0] === first);
+  return dup && parts.length > 1 ? first + " " + parts[parts.length - 1][0] + "." : first;
+}
 // ---------- wedstrijdmodus (langs het veld) ----------
 // m.live = { acc: gespeelde ms, since: starttijd als de klok loopt, halfDone, swaps: [{ b, out, in, t }] }
 const liveOf = m => (m.live = m.live || { acc: 0, since: null, halfDone: false, swaps: [] });
@@ -992,7 +1027,7 @@ function render() {
   document.getElementById("brand").innerHTML = (inTeam && s.logoUrl ? `<img class="logo" src="${esc(s.logoUrl)}" alt="">` : "") +
     "<span>" + (inTeam ? esc(s.team || "Teamplanner") + "<small>" + esc(s.club || (isHockey() ? "Jeugdhockey" : "Jeugdvoetbal")) + "</small>" : "Teamplanner<small>Jeugdsport</small>") + "</span>";
   const tabs = mode === "shared" ? TABS.filter(t => t[0] === "planning") : inTeam ? TABS : [];
-  document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${t(l)}</button>`).join("");
+  document.getElementById("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${ui.tab === k}">${mode === "shared" ? t(l) : l}</button>`).join("");
   const main = document.getElementById("main");
   const st = { el: document.activeElement && document.activeElement.id };
   if (!inTeam) { main.innerHTML = ({ loading: vLoading, login: vLogin, newteam: vNewTeam, error: vError }[mode] || vLoading)(); return; }
@@ -1318,13 +1353,15 @@ function vPlayers() {
       <textarea id="bulk-text" aria-label="Namen van spelers" placeholder="Daan de Vries - Sanne & Mark\nLotte Bakker\nSem Jansen"></textarea>
       <div class="row"><button class="btn primary" type="button" data-act="bulkadd">Spelers toevoegen</button></div>
     </details>
-    ${list.length ? `<p class="small muted">Tik op een positie om die aan of uit te zetten. Voor ouders, taken en leiders gebruik je Wijzig.</p>` : ""}
-    ${list.length ? list.map(p => `<div class="card"><div class="player-line">
-      <div><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span>
-      ${POS_GROUPS.map(([g, o]) => `<div class="names posrow"><span class="small muted posgroup">${g}</span>${Object.entries(o).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${p.pref === k ? "★ " : on ? "✓ " : ""}${l}</button>`; }).join("")}</div>`).join("")}
-      <label class="small muted prefline">Voorkeur <select data-act="setpref" data-id="${p.id}" aria-label="Voorkeurspositie ${esc(p.name)}">${prefOptions(p.pref || "")}</select></label></div>
-      <div class="names">${p.leader ? `<span class="pill home">Leider${p.leaderDrives ? " · rijdt altijd" : ""}</span>` : ""}${["canDrive", "canFlag", "canWash"].map((k, i) => `<span class="pill ${p[k] ? "ok" : "warn"}">${p[k] ? "✓" : "✗"} ${["Rijden", "Grens", "Wassen"][i]}</span>`).join("")}
-      <button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div></div>`).join("")
+    ${list.length ? `<p class="small muted">Tik op Posities om aan te geven waar een speler kan staan (★ = voorkeur). Voor ouders, taken en leiders gebruik je Wijzig.</p>` : ""}
+    ${list.length ? list.map(p => { const open = ui.openPlayer === p.id; const ps = POS_ORDER.concat("R").filter(k => (p.positions || []).includes(k));
+      return `<div class="card player"><div class="player-line">
+      <div class="player-name"><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span></div>
+      <div class="names">${p.leader ? `<span class="pill home">Leider</span>` : ""}${["canDrive", "canFlag", "canWash"].filter(k => !p[k]).map(k => `<span class="pill warn">geen ${({ canDrive: "rijden", canFlag: flagWord().toLowerCase(), canWash: "was" })[k]}</span>`).join("")}</div></div>
+      <div class="player-line"><div class="names">${ps.length ? ps.map(k => `<span class="pill ${p.pref === k ? "home" : ""}" title="${esc(POS[k] || k)}">${p.pref === k ? "★ " : ""}${k}</span>`).join("") : `<span class="pill warn">nog geen posities</span>`}</div>
+      <div class="row"><button class="btn ${open ? "primary" : ""}" data-act="openplayer" data-id="${p.id}" aria-expanded="${open}">${open ? "Klaar" : "Posities"}</button><button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div>
+      ${open ? `<div class="posedit">${POS_GROUPS.map(([g, o]) => `<div class="names posrow"><span class="small muted posgroup">${g}</span>${Object.entries(o).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${p.pref === k ? "★ " : on ? "✓ " : ""}${l}</button>`; }).join("")}</div>`).join("")}
+      <label class="small muted prefline">Voorkeur <select data-act="setpref" data-id="${p.id}" aria-label="Voorkeurspositie ${esc(p.name)}">${prefOptions(p.pref || "")}</select></label></div>` : ""}</div>`; }).join("")
       : `<p class="muted">Nog geen spelers.</p>`}`;
 }
 function vLineup() {
@@ -1342,7 +1379,7 @@ function vLineup() {
     const missing = pres.filter(p => !m.lineup.cells[p.id]);
     const cellOpts = ["K"].concat([...new Set(slotsFor())]);
     table = `<div class="tablewrap"><table><thead><tr><th>Speler</th>${durs.map((d, b) => `<th class="c">${Math.round(startAt[b])}′–${Math.round(startAt[b] + d)}′</th>`).join("")}<th class="c">Deze wedstrijd</th><th class="c">Seizoen vooraf</th></tr></thead><tbody>
-      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + lineOf(c)}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}" title="${esc(POS[c] || "")}">${cellOpts.concat(cellOpts.includes(c) ? [] : [c]).concat("-").map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
+      ${rows.map(p => `<tr><td><strong>${esc(p.name)}</strong>${(m.missedTraining || []).includes(p.id) ? ' <span class="pill" title="Niet getraind">NG</span>' : ""}</td>${m.lineup.cells[p.id].map((c, b) => `<td class="c ${c === "-" ? "bench" : "cell-" + lineOf(c)} ${fitsSlot(p, c) ? "" : "offpos"}"><select id="lu-${p.id}-${b}" data-act="cell" data-p="${p.id}" data-b="${b}" aria-label="${esc(p.name)} blok ${b + 1}" title="${esc(POS[c] || "")}">${cellOpts.concat(cellOpts.includes(c) ? [] : [c]).concat("-").map(o => `<option value="${o}" ${o === c ? "selected" : ""}>${o === "-" ? "wissel" : o}</option>`).join("")}</select></td>`).join("")}
       <td class="c">${Math.round(lineupMinutes(m, p.id))}′</td><td class="c">${Math.round(season[p.id] ? season[p.id].min : 0)}′</td></tr>`).join("")}
       <tr><td class="muted small">Op het veld</td>${counts.map(n => `<td class="c ${n !== +S.settings.onField ? "" : "muted"}" style="${n !== +S.settings.onField && pres.length >= +S.settings.onField ? "color:var(--bad);font-weight:700" : ""}">${n}</td>`).join("")}<td></td><td></td></tr>
       </tbody></table></div>
@@ -1360,13 +1397,14 @@ function vLineup() {
     ${att}
     <div class="card"><div class="grid2">
       <label class="f">Wedstrijd<select id="lu-match" data-act="pickmatch">${list.map(x => `<option value="${x.id}" ${x.id === m.id ? "selected" : ""}>${esc(fmtDate(x.date))} · ${x.home ? "thuis" : "uit"} · ${esc(x.opponent)}${x.played ? " ✓" : ""}</option>`).join("")}</select></label>
-      <div class="f"><span>Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers <span class="muted small">voor ${S.settings.onField} plekken, ${S.settings.blocks} blokken van ${Math.round(bm)} min</span></strong></div>
+      <div class="f"><span class="small muted" style="display:block">Beschikbaar</span><strong style="font-size:18px">${pres.length} spelers</strong> <strong><span class="muted small">voor ${S.settings.onField} plekken, ${S.settings.blocks} blokken van ${String(Math.round(bm * 10) / 10).replace(".", ",")} min</span></strong></div>
     </div>
     <div class="checks"><label><input type="checkbox" id="lu-reserve" data-act="usereserve" ${useReserve(m) ? "checked" : ""} ${m.played ? "disabled" : ""}> Reservekeeper keept de tweede helft${S.players.some(p => (p.positions || []).includes("R")) ? "" : ' <span class="muted small">(geef bij Spelers eerst iemand de positie reservekeeper)</span>'}</label></div>
     <div class="row"><button class="btn primary" data-act="genlineup" ${m.played ? "disabled" : ""}>${m.lineup ? "Opnieuw maken" : "Maak wisselschema"}</button>
     ${m.lineup ? `<button class="btn ${m.played ? "" : ""}" data-act="played">${m.played ? "✓ Gespeeld (telt mee)" : "Markeer als gespeeld"}</button><button class="btn ghost" data-act="copylineup">Kopieer opstelling</button>${m.played ? "" : '<button class="btn" data-act="golive">⏱ Wedstrijdmodus</button>'}` : ""}</div>
     <p class="small muted">Kinderen met de minste speelminuten dit seizoen krijgen voorrang. Wie het vorige blok wisselde, gaat er het volgende blok weer in. Een gespeelde wedstrijd telt mee voor het seizoensoverzicht.</p></div>
-    ${table}`;
+    ${m.lineup ? pitchView(m) : ""}
+    ${table ? `<details class="card tablecard" ${ui.tableOpen === false ? "" : "open"} id="lutable"><summary>Hele schema als tabel</summary>${table}</details>` : ""}`;
 }
 function vSeason() {
   if (!S.players.length) return `<h2>Seizoen</h2><p class="muted">Nog geen spelers.</p>`;
@@ -1582,11 +1620,17 @@ document.addEventListener("click", e => {
         S.players.push({ id: uid(), name, parent: (parts[1] || "").trim(), positions: [], canDrive: true, canFlag: true, canWash: true, leader: false, leaderDrives: false, leaderNoOther: false, seats: +S.settings.seatsDefault }); n++;
       });
       save(); render(); toast(n ? n + (n == 1 ? " speler" : " spelers") + " toegevoegd." + (dup ? " " + dup + (dup == 1 ? " stond er al in." : " stonden er al in.") : "") : (dup ? "Deze spelers staan er al in." : "Geen namen gevonden.")); break; }
+    case "openplayer": ui.openPlayer = ui.openPlayer === id ? null : id; render(); break;
     case "newplayer": ui.editPlayer = "new"; render(); window.scrollTo(0, 0); break;
     case "editplayer": ui.editPlayer = id; render(); window.scrollTo(0, 0); break;
     case "delplayer": if (armed("delp" + id)) { S.players = S.players.filter(x => x.id !== id); ui.editPlayer = null; save(); render(); } break;
     case "genlineup": { const mm = S.matches.find(x => x.id === ui.lineupMatch); if (mm.played) { toast("Deze wedstrijd is gespeeld. Haal eerst het vinkje Gespeeld weg als je het schema echt opnieuw wilt maken."); break; } planLineup(mm); save(); render(); toast("Wisselschema gemaakt."); break; }
     case "played": { const mm = S.matches.find(x => x.id === ui.lineupMatch); mm.played = !mm.played; save(); render(); break; }
+    case "pitchblock": ui.pitchBlock = +t.dataset.b; ui.pick = null; render(); break;
+    case "pick": { const mm = S.matches.find(x => x.id === ui.lineupMatch); if (!mm || !mm.lineup) break;
+      if (!ui.pick) { ui.pick = id; render(); break; }
+      if (ui.pick === id) { ui.pick = null; render(); break; }
+      const bb = Math.min(ui.pitchBlock || 0, lineupDurs(mm).length - 1); swapCells(mm, ui.pick, id, bb); const a1 = ui.pick; ui.pick = null; save(); render(); toast(pName(a1) + " en " + pName(id) + " geruild."); break; }
     case "golive": { const mm = S.matches.find(x => x.id === ui.lineupMatch); if (!mm || !mm.lineup) break; ui.live = mm.id; ui.liveBlock = null; render(); window.scrollTo(0, 0); break; }
     case "liveexit": ui.live = null; keepAwake(false); render(); break;
     case "liveclock": { const mm = S.matches.find(x => x.id === ui.live); const L = liveOf(mm);
@@ -1683,7 +1727,7 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "setpref") { const p = pById(t.dataset.id); if (!p) return; p.pref = t.value; p.positions = p.positions || [];
     if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref); save(); render(); return; }
   if (t.dataset.act === "pickteam") { loadTeam(t.value); return; }
-  if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; render(); return; }
+  if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; ui.pitchBlock = 0; ui.pick = null; render(); return; }
   if (t.dataset.act === "att" || t.dataset.act === "mt") {
     const m = S.matches.find(x => x.id === ui.lineupMatch); const pid = t.dataset.p; ui.attOpen = true;
     const key = t.dataset.act === "att" ? "absent" : "missedTraining"; const on = t.dataset.act === "att" ? !t.checked : t.checked;
@@ -1703,7 +1747,7 @@ document.addEventListener("change", e => {
   if (t.dataset.act === "avchild") { ui.avChild = t.value; try { localStorage.setItem("teamplanner.child." + shareToken, t.value); } catch (x) {} render(); return; }
   if (t.dataset.act === "usereserve") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.useReserve = t.checked;
     if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); } save(); render(); return; }
-  if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); m.lineup.cells[t.dataset.p][+t.dataset.b] = t.value; save(); render(); }
+  if (t.dataset.act === "cell") { const m = S.matches.find(x => x.id === ui.lineupMatch); const sw = setCell(m, t.dataset.p, +t.dataset.b, t.value); save(); render(); if (sw) toast(pName(sw) + " ruilt mee."); }
 });
 document.addEventListener("keydown", e => {
   if (e.key === "Enter" && e.target.dataset && e.target.dataset.cs) { e.preventDefault(); doClubSearch(e.target.dataset.cs); }
@@ -1747,7 +1791,7 @@ document.addEventListener("submit", e => {
   }
 });
 
-window.__tp = { get S() { return S; }, set S(x) { S = normalize(x); }, setAvail(a) { avail = a; }, render, lineupMinutes, liveSwap, liveInjured, liveLate, counts, dutyIssues, matchText, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
+window.__tp = { setCell, get S() { return S; }, set S(x) { S = normalize(x); }, setAvail(a) { avail = a; }, render, lineupMinutes, liveSwap, liveInjured, liveLate, counts, dutyIssues, matchText, parseProgram, searchClubs, calcTravel, planDuties, planLineup, seasonStats, times };
 // Offline: de app zelf (pagina, code, opmaak) wordt bewaard zodat hij ook zonder bereik opent.
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
