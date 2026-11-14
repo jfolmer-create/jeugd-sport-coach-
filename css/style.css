@@ -179,3 +179,7 @@ body.live-on nav.tabs { display: none; }
 td.offpos select { outline: 2px solid var(--warn); outline-offset: -2px; }
 details.tablecard > .tablewrap { margin-top: 8px; }
 details.tablecard { display: block; min-width: 0; overflow: hidden; }
+
+/* rugnummer, gestopte spelers */
+.nr { display: inline-block; min-width: 24px; text-align: center; font: 700 13px var(--display); background: var(--chip); border-radius: 6px; padding: 1px 5px; }
+.card.player.stopped { opacity: .6; }

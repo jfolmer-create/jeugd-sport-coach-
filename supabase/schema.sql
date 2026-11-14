@@ -250,7 +250,8 @@ as $$
          jsonb_build_object(
            'settings', coalesce((select jsonb_object_agg(s.key, s.value) from jsonb_each(coalesce(t.data->'settings', '{}'::jsonb)) s
                                  where s.key in ('club', 'team', 'sport', 'arriveBefore', 'flagAway', 'washPerMatch', 'logoUrl', 'photoUrl')), '{}'::jsonb),
-           'players', coalesce((select jsonb_agg(jsonb_build_object('id', p->'id', 'name', p->'name', 'parent', p->'parent'))
+           'players', coalesce((select jsonb_agg(jsonb_build_object('id', p->'id', 'name', p->'name', 'parent', p->'parent',
+                                                                 'guest', coalesce(p->'guest', 'false'::jsonb), 'inactive', to_jsonb(coalesce(p->>'inactiveFrom', '') <> '')))
                                 from jsonb_array_elements(coalesce(t.data->'players', '[]'::jsonb)) p), '[]'::jsonb),
            'matches', coalesce((select jsonb_agg(m - 'lineup' - 'played' - 'missedTraining' - 'useReserve' - 'live')
                                 from jsonb_array_elements(coalesce(t.data->'matches', '[]'::jsonb)) m), '[]'::jsonb),

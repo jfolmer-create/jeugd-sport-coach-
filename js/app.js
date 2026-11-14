@@ -263,7 +263,7 @@ async function closeRound() {
   if (!await setRound(false, round.matches)) return;
   const ids = round.matches;
   S.matches.filter(m => ids.includes(m.id)).forEach(m => {
-    const abs = S.players.filter(p => cannotDo(m.id, p.id, "absent")).map(p => p.id);
+    const abs = families().filter(p => cannotDo(m.id, p.id, "absent")).map(p => p.id);
     m.absent = [...new Set([...(m.absent || []), ...abs])];
     if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(pid => !m.absent.includes(pid) && !cannotDo(m.id, pid, k)));
   });
@@ -282,7 +282,7 @@ function roundCard() {
   if (mode !== "cloud") return "";
   const up = sorted().filter(m => m.date >= todayStr() && !m.cancelled);
   if (round.open) {
-    const fam = S.players; const done = fam.filter(p => avail.some(a => a.player === p.id && round.matches.includes(a.match)));
+    const fam = families(); const done = fam.filter(p => avail.some(a => a.player === p.id && round.matches.includes(a.match)));
     const todo = fam.filter(p => !done.includes(p));
     return `<div class="card"><div class="row between"><h3>Beschikbaarheid ouders</h3><span class="pill ok">ronde open</span></div>
       <p class="small">${round.matches.length} wedstrijden. <strong>${done.length} van ${fam.length}</strong> gezinnen hebben gereageerd.${todo.length ? ` <span class="muted">Nog niet: ${todo.map(p => esc(p.name)).join(", ")}.</span>` : ""}</p>
@@ -297,7 +297,7 @@ function parentCard() {
   if (mode !== "shared") return "";
   if (!round.open) return `<div class="notice">${t("Het schema staat vast. Kun je niet op je beurt? Ruil zelf met een andere ouder en laat het de coach weten.")}</div>`;
   const ms = sorted().filter(m => round.matches.includes(m.id));
-  const list = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const list = S.players.filter(p => !p.guest && !p.inactive).sort((a, b) => a.name.localeCompare(b.name));
   let pid = ui.avChild; if (!pid) { try { pid = localStorage.getItem("teamplanner.child." + shareToken); } catch (e) {} }
   const p = pById(pid);
   const box = (m, what, label) => `<label><input type="checkbox" name="${m.id}" value="${what}" ${p && cannotDo(m.id, p.id, what) ? "checked" : ""}> ${label}</label>`;
@@ -428,7 +428,13 @@ const sorted = () => S.matches.slice().sort(byDate);
 const pById = id => S.players.find(p => p.id === id);
 const pName = id => (pById(id) || {}).name || "?";
 const parentLabel = id => { const p = pById(id); if (!p) return "?"; return p.parent ? p.parent + " (" + p.name + ")" : t("ouders van {name}", { name: p.name }); };
-const present = m => S.players.filter(p => !(m.absent || []).includes(p.id));
+// Gastspeler: doet alleen mee in wedstrijden waar je hem bij zet, en de ouders krijgen geen taken.
+// Niet meer actief (inactiveFrom = datum): telt vanaf die dag niet meer mee; de geschiedenis blijft staan.
+const activeAt = (p, m) => !(p.inactiveFrom && m.date >= p.inactiveFrom);
+const squad = m => S.players.filter(p => activeAt(p, m) && (!p.guest || (m.guests || []).includes(p.id)));
+const present = m => squad(m).filter(p => !(m.absent || []).includes(p.id));
+const families = () => S.players.filter(p => !p.guest && !p.inactiveFrom);
+const nrTag = p => p && p.nr ? `<span class="nr">${esc(p.nr)}</span> ` : "";
 const isPast = m => m.date < todayStr();
 function times(m) {
   const ko = toMin(m.time), arrive = ko - (+S.settings.arriveBefore || 0);
@@ -660,7 +666,7 @@ function planDuties(onlyFuture = true) {
     const nUsed = {}; const use = id => { used.add(id); nUsed[id] = (nUsed[id] || 0) + 1; };
     const room = p => (nUsed[p.id] || 0) < (p.twoParents ? 2 : 1);
     const pick = (duty, can) => {
-      const cands = pres.filter(p => can(p) && room(p) && count[p.id] && !cannotDo(m.id, p.id, duty));
+      const cands = pres.filter(p => !p.guest && can(p) && room(p) && count[p.id] && !cannotDo(m.id, p.id, duty));
       if (!cands.length) return null;
       cands.sort((a, b) => (used.has(a.id) - used.has(b.id)) || (count[a.id][duty] - count[b.id][duty]) ||
         (last[a.id][duty] - last[b.id][duty]) || a.name.localeCompare(b.name));
@@ -669,7 +675,7 @@ function planDuties(onlyFuture = true) {
     if (!m.home) {
       let cap = 0; const need = pres.length; const taken = [];
       // leiders die altijd rijden gaan eerst mee, buiten de eerlijke verdeling om
-      let leaders = pres.filter(p => p.leader && p.leaderDrives && !cannotDo(m.id, p.id, "drive"));
+      let leaders = pres.filter(p => !p.guest && p.leader && p.leaderDrives && !cannotDo(m.id, p.id, "drive"));
       if (S.settings.leaderDriveOne && leaders.length > 1)
         leaders = [leaders.sort((a, b) => (count[a.id].drive - count[b.id].drive) || (last[a.id].drive - last[b.id].drive) || a.name.localeCompare(b.name))[0]];
       leaders.forEach(p => {
@@ -763,6 +769,8 @@ function planLineup(m, opts = {}) {
   const pres = present(m); const avail = pres.filter(p => !out.has(p.id));
   const B = Math.max(1, +S.settings.blocks || 4); const onField = Math.max(1, +S.settings.onField || 8);
   const bm = blockMin(); const season = seasonStats(m); const slots = slotsFor();
+  { const own = pres.filter(p => !p.guest); const avgMin = own.length ? own.reduce((a, p) => a + season[p.id].min, 0) / own.length : 0;
+    pres.filter(p => p.guest).forEach(p => { season[p.id] = Object.assign({}, season[p.id], { min: avgMin }); }); }
   // Komt de bank niet eerlijk uit (sommigen zouden twee blokken zitten), dan halveren we het laatste blok:
   // dan zitten er een paar spelers een half blok extra in plaats van twee spelers een heel blok.
   const benchN = Math.max(0, pres.length - onField), fieldN = Math.max(1, pres.length - 1);
@@ -855,7 +863,7 @@ function pitchView(m) {
   const at = d.map((_, i) => d.slice(0, i).reduce((a, x) => a + x, 0));
   const ids = present(m).filter(p => cells[p.id]).map(p => p.id);
   const chip = id => { const p = pById(id); const c = cells[id][b]; const off = p && !fitsSlot(p, c);
-    return `<button type="button" class="pchip ${ui.pick === id ? "picked" : ""} ${off ? "off" : ""} ${c === "K" ? "keeper" : ""}" data-act="pick" data-id="${id}" aria-pressed="${ui.pick === id}"><b>${c === "-" ? "" : esc(c)}</b>${esc(shortName(id))}${off ? " ⚠" : ""}</button>`; };
+    return `<button type="button" class="pchip ${ui.pick === id ? "picked" : ""} ${off ? "off" : ""} ${c === "K" ? "keeper" : ""}" data-act="pick" data-id="${id}" aria-pressed="${ui.pick === id}"><b>${c === "-" ? "" : esc(c)}${p && p.nr ? " · " + esc(p.nr) : ""}</b>${esc(shortName(id))}${off ? " ⚠" : ""}</button>`; };
   const rows = PITCH_ROWS.map(r => ids.filter(id => r.includes(cells[id][b])).sort((x, y) => r.indexOf(cells[x][b]) - r.indexOf(cells[y][b]))).filter(r => r.length);
   const bench = ids.filter(id => cells[id][b] === "-");
   const offN = ids.filter(id => { const p = pById(id); return p && !fitsSlot(p, cells[id][b]); }).length;
@@ -955,7 +963,7 @@ function vLive(m) {
   const half = L.halfDone ? "2e helft" : "1e helft";
   const opt = list => list.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
   const onPlayers = onIds.map(pById).filter(Boolean);
-  const absentKids = S.players.filter(p => (m.absent || []).includes(p.id));
+  const absentKids = squad(m).filter(p => (m.absent || []).includes(p.id));
   return `<div class="live">
     <div class="row between"><button class="btn ghost" data-act="liveexit">← Terug</button><span class="date">${esc(fmtDate(m.date))} · ${m.home ? "thuis" : "uit"} · ${esc(m.opponent)}</span></div>
     <div class="card live-clock-card"><div class="live-clock" id="live-clock">${clockText(liveMs(m))}</div>
@@ -963,7 +971,7 @@ function vLive(m) {
       <div class="row" style="justify-content:center">${ended ? "" : `<button class="btn primary big" data-act="liveclock">${running ? "Pauze" : min > 0 ? (L.halfDone && Math.abs(min - total / 2) < 0.02 ? "Start 2e helft" : "Verder") : "Start wedstrijd"}</button>`}
       <button class="btn ${ui.arm === "liveend" ? "arm" : ""}" data-act="liveend">${ui.arm === "liveend" ? "Zeker? Minuten tellen dan mee" : "Wedstrijd afgelopen"}</button></div></div>
     ${next}
-    <div class="card"><h3>In het veld</h3><div class="live-field">${onIds.map(id => `<div><span class="pill cell-${lineOf(f[id])}">${esc(f[id])}</span> ${esc(pName(id))}</div>`).join("") || '<p class="small muted">–</p>'}</div></div>
+    <div class="card"><h3>In het veld</h3><div class="live-field">${onIds.map(id => `<div><span class="pill cell-${lineOf(f[id])}">${esc(f[id])}</span> ${nrTag(pById(id))}${esc(pName(id))}</div>`).join("") || '<p class="small muted">–</p>'}</div></div>
     <div class="card"><h3>Bank</h3><p>${bench.map(p => esc(p.name) + (outSet.has(p.id) ? ' <span class="pill warn">kan niet verder</span>' : "")).join(", ") || '<span class="muted small">niemand</span>'}</p></div>
     ${ended ? "" : `<details class="card"><summary>Nu anders wisselen</summary>
       <div class="grid2"><label class="f">Eruit<select id="lv-out">${opt(onPlayers)}</select></label><label class="f">Erin<select id="lv-in">${opt(bench.filter(p => !outSet.has(p.id)))}</select></label></div>
@@ -1253,7 +1261,7 @@ function matchCard(m, isNext) {
     </div>` : ""}</article>`;
 }
 function dutyEditor(m) {
-  const d = m.duties || {}; const fams = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const d = m.duties || {}; const fams = S.players.filter(p => !p.guest && activeAt(p, m)).sort((a, b) => a.name.localeCompare(b.name));
   const sel = (duty, i, val) => `<select id="de-${m.id}-${duty}-${i}" data-act="dutyset" data-m="${m.id}" data-d="${duty}" data-i="${i}" aria-label="${dutyName(duty)} ${i + 1}">
     <option value="">${val ? "— weghalen —" : "+ toevoegen"}</option>${fams.map(p => `<option value="${p.id}" ${p.id === val ? "selected" : ""}>${esc(parentLabel(p.id))}</option>`).join("")}</select>`;
   const row = (duty, multi) => { const cur = d[duty] || []; const slots = multi ? cur.concat([""]) : (cur.length ? cur : [""]);
@@ -1292,7 +1300,8 @@ function matchForm(m) {
     </div>
     <p class="small muted" id="travel-info" ${m.home !== false ? "hidden" : ""}>${m.travelPlace ? "Berekend naar: " + esc(m.travelPlace) + (m.km ? " (" + m.km + " km)" : "") : "Laat je het adres leeg, dan zoekt de planner op de naam van de club."}</p>
     ${maps ? `<p class="small"><a href="${maps}" target="_blank" rel="noopener">Reistijd opzoeken in Google Maps</a></p>` : `<p class="small muted">Tip: vul je thuisadres in bij Instellingen, dan krijg je hier een link naar de route.</p>`}
-    ${S.players.length ? `<div class="f"><span class="small muted">Afwezig (ziek, vakantie, …)</span><div class="checks">${S.players.map(p => `<label><input type="checkbox" name="absent" value="${p.id}" ${(m.absent || []).includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("")}</div></div>` : ""}
+    ${S.players.some(p => p.guest) ? `<div class="f"><span class="small muted">Gastspelers bij deze wedstrijd</span><div class="checks">${S.players.filter(p => p.guest).map(p => `<label><input type="checkbox" name="guests" value="${p.id}" ${(m.guests || []).includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("")}</div></div>` : ""}
+    ${S.players.length ? `<div class="f"><span class="small muted">Afwezig (ziek, vakantie, …)</span><div class="checks">${S.players.filter(p => !p.guest && activeAt(p, { date: m.date || todayStr() })).map(p => `<label><input type="checkbox" name="absent" value="${p.id}" ${(m.absent || []).includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("")}</div></div>` : ""}
     <div class="row"><button class="btn primary" type="submit">Opslaan</button><button class="btn ghost" type="button" data-act="cancel">Annuleren</button>
     ${isNew ? "" : `<button class="btn ${ui.arm === "delm" + m.id ? "arm" : "danger"}" type="button" data-act="delmatch" data-id="${m.id}">${ui.arm === "delm" + m.id ? "Zeker weten? Tik nogmaals" : "Verwijderen"}</button>`}</div>
   </form>`;
@@ -1326,7 +1335,11 @@ function playerForm(p) {
     <div class="grid2">
       <label class="f">Naam speler<input id="pf-name" name="name" value="${esc(p.name || "")}" required></label>
       <label class="f">Naam ouder(s)<input id="pf-parent" name="parent" value="${esc(p.parent || "")}" placeholder="bv. Sanne & Mark"></label>
+      <label class="f">Rugnummer (mag leeg)<input id="pf-nr" name="nr" inputmode="numeric" maxlength="3" value="${esc(p.nr || "")}"></label>
     </div>
+    <div class="f"><span class="small muted">Soort speler</span><div class="checks" style="flex-direction:column">
+      <label><input type="checkbox" name="guest" ${p.guest ? "checked" : ""}> Gastspeler van een ander team: doet alleen mee in wedstrijden waar je hem bij zet (bij Wissels → Wie is er?), en de ouders krijgen geen taken</label>
+      ${isNew ? "" : `<label><input type="checkbox" name="inactive" ${p.inactiveFrom ? "checked" : ""}> Niet meer actief (gestopt of naar een ander team)${p.inactiveFrom ? " sinds " + esc(fmtDate(p.inactiveFrom)) : ""}: telt niet meer mee voor nieuwe schema's; de speelminuten en taken tot nu toe blijven staan</label>`}</div></div>
     <div class="f"><span class="small muted">Posities</span>${POS_GROUPS.map(([g, o]) => `<div class="small muted" style="margin-top:6px">${g}</div><div class="checks">${Object.entries(o).map(([k, l]) => `<label><input type="checkbox" name="pos" value="${k}" ${(p.positions || []).includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div>`).join("")}</div>
     <label class="f" style="max-width:260px">Voorkeurspositie<select id="pf-pref" name="pref">${prefOptions(p.pref || "")}</select></label>
     <div class="f"><span class="small muted">Wat kunnen de ouders doen?</span><div class="checks">
@@ -1345,8 +1358,9 @@ function playerForm(p) {
 }
 function vPlayers() {
   const editing = ui.editPlayer ? (ui.editPlayer === "new" ? {} : pById(ui.editPlayer)) : null;
-  const list = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
-  return `<div class="row between"><h2>Spelers <span class="muted" style="font-size:18px">${S.players.length}</span></h2><button class="btn primary" data-act="newplayer">Speler toevoegen</button></div>
+  const rank = p => (p.inactiveFrom ? 2 : p.guest ? 1 : 0);
+  const list = S.players.slice().sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+  return `<div class="row between"><h2>Spelers <span class="muted" style="font-size:18px">${families().length}</span></h2><button class="btn primary" data-act="newplayer">Speler toevoegen</button></div>
     ${editing ? playerForm(editing) : ""}
     <details class="card" id="bulkbox" ${S.players.length ? "" : "open"}><summary>Meerdere spelers tegelijk toevoegen</summary>
       <p class="small muted">Zet één naam per regel. Wil je de ouders er meteen bij, zet die dan achter een streepje, bv. <em>Daan de Vries - Sanne &amp; Mark</em>. Kopiëren uit een WhatsApp-lijst of Excel mag ook. Daarna tik je hieronder per speler de posities aan.</p>
@@ -1355,9 +1369,9 @@ function vPlayers() {
     </details>
     ${list.length ? `<p class="small muted">Tik op Posities om aan te geven waar een speler kan staan (★ = voorkeur). Voor ouders, taken en leiders gebruik je Wijzig.</p>` : ""}
     ${list.length ? list.map(p => { const open = ui.openPlayer === p.id; const ps = POS_ORDER.concat("R").filter(k => (p.positions || []).includes(k));
-      return `<div class="card player"><div class="player-line">
-      <div class="player-name"><strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span></div>
-      <div class="names">${p.leader ? `<span class="pill home">Leider</span>` : ""}${["canDrive", "canFlag", "canWash"].filter(k => !p[k]).map(k => `<span class="pill warn">geen ${({ canDrive: "rijden", canFlag: flagWord().toLowerCase(), canWash: "was" })[k]}</span>`).join("")}</div></div>
+      return `<div class="card player ${p.inactiveFrom ? "stopped" : ""}"><div class="player-line">
+      <div class="player-name">${nrTag(p)}<strong>${esc(p.name)}</strong> <span class="muted small">${esc(p.parent || "")}</span></div>
+      <div class="names">${p.inactiveFrom ? `<span class="pill">niet meer actief</span>` : ""}${p.guest ? `<span class="pill away">gastspeler</span>` : ""}${p.leader ? `<span class="pill home">Leider</span>` : ""}${p.guest || p.inactiveFrom ? "" : ["canDrive", "canFlag", "canWash"].filter(k => !p[k]).map(k => `<span class="pill warn">geen ${({ canDrive: "rijden", canFlag: flagWord().toLowerCase(), canWash: "was" })[k]}</span>`).join("")}</div></div>
       <div class="player-line"><div class="names">${ps.length ? ps.map(k => `<span class="pill ${p.pref === k ? "home" : ""}" title="${esc(POS[k] || k)}">${p.pref === k ? "★ " : ""}${k}</span>`).join("") : `<span class="pill warn">nog geen posities</span>`}</div>
       <div class="row"><button class="btn ${open ? "primary" : ""}" data-act="openplayer" data-id="${p.id}" aria-expanded="${open}">${open ? "Klaar" : "Posities"}</button><button class="btn ghost" data-act="editplayer" data-id="${p.id}">Wijzig</button></div></div>
       ${open ? `<div class="posedit">${POS_GROUPS.map(([g, o]) => `<div class="names posrow"><span class="small muted posgroup">${g}</span>${Object.entries(o).map(([k, l]) => { const on = (p.positions || []).includes(k); return `<button type="button" class="pill postog ${on ? "home" : ""}" aria-pressed="${on}" data-act="togpos" data-id="${p.id}" data-pos="${k}">${p.pref === k ? "★ " : on ? "✓ " : ""}${l}</button>`; }).join("")}</div>`).join("")}
@@ -1386,12 +1400,14 @@ function vLineup() {
       ${missing.length ? `<div class="notice">Nog niet ingedeeld: ${missing.map(p => esc(p.name)).join(", ")}. Maak het schema opnieuw.</div>` : ""}
       <p class="small muted">${["K"].concat(cellOpts.filter(o => o !== "K")).map(o => o + " = " + (POS[o] || o).toLowerCase()).join(", ")}. Pas een vakje aan als je iets anders wilt; de minuten rekenen mee.</p>`;
   }
-  const att = `<details class="card" ${ui.attOpen ? "open" : ""} id="attbox"><summary>Wie is er? ${S.players.length - pres.length ? `<span class="pill warn">${S.players.length - pres.length} afwezig</span>` : ""} ${(m.missedTraining || []).length ? `<span class="pill">${m.missedTraining.length} niet getraind</span>` : ""}</summary>
+  const att = `<details class="card" ${ui.attOpen ? "open" : ""} id="attbox"><summary>Wie is er? ${squad(m).length - pres.length ? `<span class="pill warn">${squad(m).length - pres.length} afwezig</span>` : ""}${(m.guests || []).filter(pById).length ? ` <span class="pill">${(m.guests || []).filter(pById).length} gast</span>` : ""} ${(m.missedTraining || []).length ? `<span class="pill">${m.missedTraining.length} niet getraind</span>` : ""}</summary>
     <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Speler</th><th class="c">Aanwezig</th><th class="c">Niet getraind</th></tr></thead><tbody>
-    ${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => { const ab = (m.absent || []).includes(p.id), mt = (m.missedTraining || []).includes(p.id);
-      return `<tr><td>${esc(p.name)}</td><td class="c"><input type="checkbox" id="att-${p.id}" data-act="att" data-p="${p.id}" ${ab ? "" : "checked"} ${m.played ? "disabled" : ""} aria-label="${esc(p.name)} aanwezig"></td>
+    ${squad(m).sort((a, b) => a.name.localeCompare(b.name)).map(p => { const ab = (m.absent || []).includes(p.id), mt = (m.missedTraining || []).includes(p.id);
+      return `<tr><td>${esc(p.name)}${p.guest ? ' <span class="pill">gast</span>' : ""}</td><td class="c"><input type="checkbox" id="att-${p.id}" data-act="att" data-p="${p.id}" ${ab ? "" : "checked"} ${m.played ? "disabled" : ""} aria-label="${esc(p.name)} aanwezig"></td>
       <td class="c"><input type="checkbox" id="mt-${p.id}" data-act="mt" data-p="${p.id}" ${mt ? "checked" : ""} ${ab || m.played ? "disabled" : ""} aria-label="${esc(p.name)} niet getraind"></td></tr>`; }).join("")}
     </tbody></table></div>
+    ${S.players.some(p => p.guest) ? `<div class="f"><span class="small muted">Gastspelers erbij</span><div class="checks">${S.players.filter(p => p.guest).map(p => `<label><input type="checkbox" id="gst-${p.id}" data-act="guest" data-p="${p.id}" ${(m.guests || []).includes(p.id) ? "checked" : ""} ${m.played ? "disabled" : ""}> ${esc(p.name)}</label>`).join("")}</div></div>`
+      : `<p class="small muted">Leen je een speler van een ander team? Voeg hem toe bij Spelers en vink daar Gastspeler aan.</p>`}
     <p class="small muted">Wie niet getraind heeft, begint op de bank, tenzij er anders te weinig spelers zijn. Daarna telt alleen het eerlijk verdelen van de speelminuten.</p></details>`;
   return `<h2>Wisselschema</h2>
     ${att}
@@ -1412,16 +1428,17 @@ function vSeason() {
   const playedN = S.matches.filter(counts).length;
   const dc = {}; S.players.forEach(p => dc[p.id] = { drive: 0, flag: 0, wash: 0 });
   S.matches.forEach(m => Object.entries(m.duties || {}).forEach(([k, ids]) => (ids || []).forEach(id => { if (dc[id]) dc[id][k]++; })));
-  const rows = S.players.slice().sort((a, b) => st[b.id].min - st[a.id].min);
-  const avg = rows.reduce((s, p) => s + st[p.id].min, 0) / rows.length;
+  const rows = S.players.filter(p => !(p.guest && !st[p.id].games) && !(p.inactiveFrom && !st[p.id].games)).sort((a, b) => st[b.id].min - st[a.id].min);
+  const own = rows.filter(p => !p.guest && !p.inactiveFrom); const avg = own.length ? own.reduce((s, p) => s + st[p.id].min, 0) / own.length : 0;
+  const tag = p => (p.guest ? ' <span class="pill">gast</span>' : "") + (p.inactiveFrom ? ' <span class="pill">gestopt</span>' : "");
   return `<h2>Seizoen</h2>
   <p class="muted small">${playedN} gespeelde wedstrijd(en) met wisselschema. Gemiddeld ${Math.round(avg)} speelminuten per kind. Een wedstrijd telt mee zodra je hem als gespeeld markeert of de datum voorbij is; afgelaste wedstrijden tellen niet mee.</p>
   <div class="tablewrap"><table><thead><tr><th>Speler</th><th>Speelminuten</th><th class="c">Min</th><th class="c">% van mogelijk</th><th class="c">Keeper-blokken</th></tr></thead><tbody>
-  ${rows.map(p => { const x = st[p.id]; return `<tr><td>${esc(p.name)}</td><td><div class="bar"><i style="width:${(x.min / max * 100).toFixed(0)}%"></i></div></td><td class="c">${Math.round(x.min)}</td><td class="c">${x.avail ? Math.round(x.min / x.avail * 100) + "%" : "–"}</td><td class="c">${x.keeper}</td></tr>`; }).join("")}
+  ${rows.map(p => { const x = st[p.id]; return `<tr><td>${esc(p.name)}${tag(p)}</td><td><div class="bar"><i style="width:${(x.min / max * 100).toFixed(0)}%"></i></div></td><td class="c">${Math.round(x.min)}</td><td class="c">${x.avail ? Math.round(x.min / x.avail * 100) + "%" : "–"}</td><td class="c">${x.keeper}</td></tr>`; }).join("")}
   </tbody></table></div>
   <h3>Taken per gezin (hele seizoen, ook gepland)</h3>
   <div class="tablewrap"><table><thead><tr><th>Gezin</th><th class="c">Rijden</th><th class="c">${flagWord()}</th><th class="c">Wassen</th><th class="c">Totaal</th></tr></thead><tbody>
-  ${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => { const d = dc[p.id]; return `<tr><td>${esc(parentLabel(p.id))}</td><td class="c">${p.canDrive ? d.drive : "–"}</td><td class="c">${p.canFlag ? d.flag : "–"}</td><td class="c">${p.canWash ? d.wash : "–"}</td><td class="c"><strong>${d.drive + d.flag + d.wash}</strong></td></tr>`; }).join("")}
+  ${S.players.filter(p => !p.guest && !(p.inactiveFrom && !(dc[p.id].drive + dc[p.id].flag + dc[p.id].wash))).sort((a, b) => a.name.localeCompare(b.name)).map(p => { const d = dc[p.id]; return `<tr><td>${esc(parentLabel(p.id))}${tag(p)}</td><td class="c">${p.canDrive ? d.drive : "–"}</td><td class="c">${p.canFlag ? d.flag : "–"}</td><td class="c">${p.canWash ? d.wash : "–"}</td><td class="c"><strong>${d.drive + d.flag + d.wash}</strong></td></tr>`; }).join("")}
   </tbody></table></div>`;
 }
 function vSettings() {
@@ -1728,6 +1745,12 @@ document.addEventListener("change", e => {
     if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref); save(); render(); return; }
   if (t.dataset.act === "pickteam") { loadTeam(t.value); return; }
   if (t.dataset.act === "pickmatch") { ui.lineupMatch = t.value; ui.pitchBlock = 0; ui.pick = null; render(); return; }
+  if (t.dataset.act === "guest") {
+    const m = S.matches.find(x => x.id === ui.lineupMatch); const pid = t.dataset.p; ui.attOpen = true;
+    m.guests = (m.guests || []).filter(x => x !== pid); if (t.checked) m.guests.push(pid);
+    if (m.lineup && !m.played) { planLineup(m); toast("Wisselschema aangepast."); }
+    save(); render(); return;
+  }
   if (t.dataset.act === "att" || t.dataset.act === "mt") {
     const m = S.matches.find(x => x.id === ui.lineupMatch); const pid = t.dataset.p; ui.attOpen = true;
     const key = t.dataset.act === "att" ? "absent" : "missedTraining"; const on = t.dataset.act === "att" ? !t.checked : t.checked;
@@ -1765,7 +1788,7 @@ document.addEventListener("submit", e => {
     m.date = fd.get("date"); m.time = fd.get("time"); m.home = fd.get("home") === "1"; m.opponent = (fd.get("opponent") || "").trim();
     const newAddr = m.home ? "" : (fd.get("address") || "").trim();
     if (newAddr !== (m.address || "")) { m.travelPlace = ui.travelCalc && ui.travelCalc.addr === newAddr ? ui.travelCalc.label : ""; }
-    m.address = newAddr; m.travel = m.home ? 0 : +fd.get("travel") || 0; m.absent = fd.getAll("absent");
+    m.address = newAddr; m.travel = m.home ? 0 : +fd.get("travel") || 0; m.absent = fd.getAll("absent"); m.guests = fd.getAll("guests");
     if (ui.travelCalc && !m.home && +ui.travelCalc.minutes === m.travel) { m.km = ui.travelCalc.km; m.travelPlace = ui.travelCalc.label;
       if (ui.travelCalc.addr && ui.travelCalc.addr === m.address) shareClub(m.opponent, m.address, ui.travelCalc.lat, ui.travelCalc.lon); }
     ui.travelCalc = null;
@@ -1777,7 +1800,17 @@ document.addEventListener("submit", e => {
     p.name = (fd.get("name") || "").trim(); p.parent = (fd.get("parent") || "").trim(); p.positions = fd.getAll("pos"); p.pref = fd.get("pref") || ""; if (p.pref && !fits(p, p.pref)) p.positions.push(p.pref);
     p.canDrive = fd.has("canDrive"); p.canFlag = fd.has("canFlag"); p.canWash = fd.has("canWash"); p.twoParents = fd.has("twoParents");
     p.leader = fd.has("leader"); p.leaderDrives = fd.has("leaderDrives"); p.leaderNoOther = fd.has("leaderNoOther"); p.seats = +fd.get("seats") || +S.settings.seatsDefault;
-    if (!id) S.players.push(p); ui.editPlayer = null; save(); render(); toast("Speler opgeslagen.");
+    p.nr = (fd.get("nr") || "").trim().slice(0, 3); p.guest = fd.has("guest");
+    const stop = fd.has("inactive");
+    if (stop && !p.inactiveFrom) {
+      p.inactiveFrom = todayStr(); p.inactive = true;
+      // uit de komende wedstrijden halen: taken vervallen, niet-gespeelde wisselschema's opnieuw
+      S.matches.filter(m => m.date >= p.inactiveFrom && !m.played).forEach(m => {
+        if (m.duties) Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(x => x !== p.id));
+        if (m.lineup && m.lineup.cells[p.id]) planLineup(m); });
+    } else if (!stop && p.inactiveFrom) { delete p.inactiveFrom; p.inactive = false; }
+    if (p.guest) S.matches.filter(m => m.date >= todayStr() && !m.played && m.duties).forEach(m => Object.keys(m.duties).forEach(k => m.duties[k] = (m.duties[k] || []).filter(x => x !== p.id)));
+    if (!id) S.players.push(p); ui.editPlayer = null; save(); render(); toast(stop && p.inactiveFrom === todayStr() ? "Opgeslagen. Kijk bij Planning of er nu een taak open staat." : "Speler opgeslagen.");
   } else if (f.id === "settingsform") {
     const s = S.settings;
     ["club", "team", "homeAddress", "formation"].forEach(k => s[k] = (fd.get(k) || "").trim());

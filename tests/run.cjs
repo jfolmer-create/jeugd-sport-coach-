@@ -118,6 +118,22 @@ function check(name, ok, info) { if (ok) { passed++; console.log("  ✓ " + name
   check("voorbije wedstrijd telt mee, ook zonder vinkje gespeeld", count.past === true);
   check("afgelaste wedstrijd telt niet mee", count.cancelled === false);
 
+  console.log("Gastspelers en gestopte spelers");
+  const gst = await ev(T => {
+    const tp = window.__tp; T.players.push({ id: "g1", name: "Gast Gijs", positions: ["A"], guest: true, canDrive: true, canFlag: true, canWash: true });
+    T.players[12].inactiveFrom = T.matches[3].date; T.matches[1].guests = ["g1"];
+    tp.S = T; const S = tp.S; tp.planDuties(); S.matches.slice(0, 5).forEach(m => tp.planLineup(m));
+    const duties = S.matches.flatMap(m => Object.values(m.duties || {}).flat());
+    return { guestDuty: duties.includes("g1"), inM1: !!S.matches[1].lineup.cells.g1, inM0: !!S.matches[0].lineup.cells.g1,
+      stoppedBefore: !!S.matches[2].lineup.cells.p12, stoppedAfter: !!S.matches[3].lineup.cells.p12,
+      stoppedDutyAfter: S.matches.slice(3).some(m => Object.values(m.duties || {}).flat().includes("p12")),
+      guestMin: tp.lineupMinutes(S.matches[1], "g1") };
+  }, team());
+  check("gastspeler doet alleen mee in de wedstrijd waar hij bij staat", gst.inM1 && !gst.inM0);
+  check("ouders van een gastspeler krijgen geen taken", !gst.guestDuty);
+  check("gastspeler krijgt speeltijd", gst.guestMin > 0, String(gst.guestMin));
+  check("gestopte speler: wel in eerdere wedstrijden, niet meer daarna", gst.stoppedBefore && !gst.stoppedAfter && !gst.stoppedDutyAfter);
+
   console.log("Overig");
   const misc = await ev(() => {
     const tp = window.__tp;
